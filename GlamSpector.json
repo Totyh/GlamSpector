@@ -1,0 +1,13 @@
+{
+  "Author": "Private development build",
+  "Name": "GlamSpector",
+  "Punchline": "Capture inspected glamours and keep a searchable Glamour Library.",
+  "Description": "Milestone 3.14.0 development build. Makes the Glamour Library preview-first: managed captures always keep the Inspect character preview and use it before the full card, while every new personal Fitting Room preview becomes the primary thumbnail automatically. My Previews is now a gallery of up to three shots per row. Any personal preview can generate a shareable GlamSpector card from the saved item/dye/Facewear recipe; generated Share Cards are stored as extra Library media with copy/open/delete controls. Keeps Glam Codes, one-at-a-time Eorzea Collection import, Library filters, tags/notes, Wanted items, ownership progress, item actions, Try On, ratings, duplicate cleanup, Adventurer Plate capture, file-size sorting, and per-entry media folders. /glamspector library | config",
+  "ApplicableVersion": "any",
+  "Tags": [
+    "glamour",
+    "inspect",
+    "screenshot",
+    "library"
+  ]
+}

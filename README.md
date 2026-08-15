@@ -1,0 +1,186 @@
+# GlamSpector
+
+## M3.14.0 — Preview-first Library
+
+- New managed captures **always keep the Inspect character preview** and use it as the Library image before the full Glam Card. The full card is retained as secondary/share media. The old **Save raw preview** setting now applies only when automatic Library indexing is disabled.
+- Personal **Capture my preview** shots are now first-class Library visuals. Every fresh Fitting Room preview automatically becomes the entry's Primary image; older M3.12/M3.13 entries with personal previews are promoted preview-first automatically while preserving an existing user-selected Primary preview.
+- Replaces the one-at-a-time personal-preview viewer with a **gallery of up to three previews per row** (wrapping to additional rows). Each tile can be set Primary, opened, deleted, or used to create a share card.
+- Adds **Create share card** for personal previews. GlamSpector combines that preview with the entry's saved gear, dyes and Facewear using the existing card renderer, then stores the result as separate **Share Cards** media. Generated cards can be copied to the clipboard for Discord, opened, located on disk, or deleted independently.
+- Adds an **Inspect Preview** media tab and clearer separation between **Primary**, **My Previews**, **Share Cards**, **Full Card**, source images, and the actual FFXIV **Adventurer Plate**.
+- Generated share cards are tracked in SQLite, counted in per-entry media size, cleaned up with full-entry deletion/duplicate cleanup, and remain independent if their source personal preview is later deleted.
+- Keeps the M3.13 Fitting Room crop (`bottomRatio: 0.879`) that restored the thin bottom frame without bringing back the circular action strip.
+
+### Suggested M3.14 test
+
+1. Capture a brand-new inspected glamour with automatic Library indexing enabled. Its Library thumbnail/Primary image should be the **Inspect Preview**, while **Full Card** remains available as extra media.
+2. Press **Try on glam**, compose three different Fitting Room shots and press **Capture my preview** after each. The newest shot should become Primary automatically.
+3. Open **My Previews** and confirm all three appear side by side at a wide Library window; a fourth should wrap onto the next row. Test **Set primary**, **Open PNG**, **Folder**, and **Delete…** independently.
+4. On one personal preview press **Create share card**. GlamSpector should switch to **Share Cards** and show a generated card containing the preview plus the saved item/dye recipe. Test **Copy** by pasting into Discord or an image-capable app, then test Open/Folder/Delete.
+5. Delete the source personal preview after generating its share card. The generated card should remain available.
+6. Sort by **File size** and confirm generated share-card files contribute to the entry total. Full **Delete entry & files…** should remove previews and generated share cards too.
+
+## M3.13.0 — Library UI cleanup
+
+- Reworks the Library toolbar so the high-frequency controls are easier to scan: **Search**, **Refresh**, **Import…**, **Wanted**, **Filters**, **Sort**, **Library tools…**, and Settings. The four import paths now live under one **Import…** popup; duplicate cleanup moved under **Library tools…**.
+- Reorganizes a selected glam into clearer sections. **Try on glam** and **Capture my preview** are the primary actions, while **Copy Glam Code** and the Wanted helper are secondary actions beneath them.
+- Gives the media viewer its own heading and keeps personal-preview controls with the preview itself: select preview, set primary, open PNG/folder, or delete only that preview.
+- Moves original-card/file/export/Plate/source-link actions into a quieter collapsed **Files & sharing** section. **Open entry folder** remains available for image-less Glam Code/EC recipe entries.
+- Moves **Remove from library** and **Delete entry & files…** to a separate collapsed **Library entry** section at the very bottom, with clearer confirmations describing whether disk files are kept or permanently deleted.
+- Nudges the Fitting Room personal-preview crop bottom edge from `0.872` to `0.879`, restoring the few missing pixels of the native preview frame without bringing back the bottom action-button strip.
+
+### Suggested M3.13 test
+
+1. Open the Library and verify **Import…** contains Existing captures, `.glamspector.zip`, Glam Code, and Eorzea Collection; **Library tools…** should contain duplicate cleanup.
+2. Select a structured glam and verify **Try on glam** / **Capture my preview** are the obvious first actions.
+3. Open **My Previews**, test **Open PNG**, **Open folder**, **Set as primary**, and **Delete preview…**.
+4. Expand **Files & sharing** and verify original-card/file/export/Plate actions still work.
+5. Scroll to the bottom, expand **Library entry**, and confirm the two destructive choices are clearly separated from preview deletion.
+6. Capture a fresh Fitting Room preview and confirm the full thin bottom frame is present while the circular action buttons remain excluded.
+
+## M3.12.1 — Preview UI polish
+
+- Renames the whole-entry destructive action from **Delete capture…** to **Delete entry & files…**, so it cannot be confused with **Delete preview…** in the personal-preview area.
+- Fixes the personal-preview **Open PNG** and **Open folder** buttons by giving them unique ImGui IDs; previously they collided with the same-labelled entry-level buttons in the same window.
+- Tightens the bottom edge of Fitting Room personal-preview capture so the native bottom action-button strip is excluded while the character preview frame remains.
+
+## M3.12.0 — Personal Fitting Room previews + media folders
+
+- Every structured Library entry can now save **personal previews** from FFXIV's native Fitting Room, including normal captures, Glam Code imports, and Eorzea Collection imports.
+- Workflow is intentionally manual: **Try on glam**, rotate/zoom the native Fitting Room until the shot looks right, then press **Capture my preview**. GlamSpector captures the current view without re-running Try On.
+- Multiple personal previews can be kept per entry. The **My Previews** gallery can set one as the primary Library thumbnail, open its PNG/folder, or delete only that individual preview. Entries with an original card/source image can switch the primary image back to the original.
+- For image-less Glam Code / Eorzea Collection entries, the first personal preview becomes the primary thumbnail automatically.
+- Added **File size** Library sort. It sorts by the total size of files associated with each entry (card/recipe, raw preview, diagnostic JSON, Plate, source images, and personal previews), with duplicate file paths counted once.
+- Newly auto-indexed native captures are stored together under `OutputDirectory/LibraryMedia/Captures/<entry>/` (`glam-card.png`, optional `raw-preview.png`, `diagnostic.json`, `adventurer-plate.png`, and `previews/`). New Glam Codes/imported packages likewise use managed per-entry folders.
+- Existing flat captures and their old paths remain supported; M3.12 does **not** force a bulk migration or move old files. Personal previews added to a legacy entry are stored safely under `LibraryMedia/Legacy/Entry-.../`.
+- Deleting a full capture now also removes its tracked personal/source media. **Remove from library only** continues to leave files on disk.
+
+### Suggested M3.12 test
+
+1. Select an imported Glam Code or EC entry, press **Try on glam**, adjust the Fitting Room camera, then press **Capture my preview**. The first image-less-entry preview should become its thumbnail.
+2. Capture two or three different angles, open **My Previews**, set a different one primary, delete one, and verify the others remain.
+3. On a normal captured entry, set a personal preview primary and then use **Use original as primary** to return to the Glam Card.
+4. Reload the plugin / relog and verify the previews still exist.
+5. Sort by **File size** and confirm the largest media-heavy entries appear first.
+
+
+## M3.11.1 - Eorzea Collection browser fallback
+
+Eorzea Collection may return HTTP 403 to a normal plugin HTTP client even when the same glamour page opens in the user's browser. GlamSpector does not try to bypass that protection or read browser cookies. The Import EC window now includes a manual browser fallback: open the one glamour page, use Ctrl+U / Ctrl+A / Ctrl+C to copy its HTML source, paste it into GlamSpector, and import from that source. The existing parser and image downloader are then used on the user-supplied page data.
+
+# GlamSpector
+
+## M3.11.0 — Eorzea Collection import
+
+- Library toolbar: **Import EC**. Paste one URL like `https://ffxiv.eorzeacollection.com/glamour/350011/petals-and-lace`.
+- GlamSpector fetches only that single page (no catalogue crawl/bulk scraping), parses the visible equipment/dyes/Facewear when present, resolves names against local FFXIV sheets, and saves the result as a normal Library entry.
+- Up to 8 large source pictures are cached locally under the plugin config directory in `EorzeaCollection/<glamour id>/`. The Library shows a **Source Images** viewer and retains creator/source attribution plus the original URL.
+- Imported EC entries work with Try On, item actions, ownership/Wanted, ratings, tags/notes, filters, and **Copy Glam Code**.
+- If the website returns HTTP 403 to the plugin request, GlamSpector stops and reports it; it does not attempt to bypass anti-bot protection.
+- Fixes the M3.10.0 compile error in `GlamCodeService` where both dye lookups used the same `out var stain` local name.
+
+## M3.7.7 — interactive Library items
+
+- Library item names now expose a right-click context menu.
+- **Try On** loads just that visible glamour item with its captured dye(s) into FFXIV's native Fitting Room.
+- **Link in chat** uses FFXIV's native item-link path to insert the item into the chat input; GlamSpector never sends the message automatically.
+- **Copy item name** is included as a small convenience.
+- Native Try On/chat operations are queued onto `Framework.Update`, keeping them out of the ImGui draw callback.
+
+# GlamSpector M3.7.1 — Ratings + ownership polish
+
+M3.7 expands the Library's **Owned** hints while keeping the important rule that a negative result is not presented as proof that an item is missing.
+
+## Ownership sources
+
+For the current character GlamSpector now checks:
+
+- Inventory and equipped gear;
+- Armoury Chest;
+- Chocobo / Premium Saddlebags;
+- currently loaded retainer containers;
+- **FFXIV's own cached Glamour Dresser item list** via `ItemFinderModule`;
+- **Armoire**, when the server-side Cabinet data is loaded;
+- **Facewear unlock state** for the Facewear stored with a capture.
+
+The game's ItemFinder module is the same subsystem behind `/isearch`; it retains a cached Glamour Dresser list and saddlebag data when available. The Armoire itself reports whether its data has been loaded before `IsItemInCabinet` can be used.
+
+A missing item displays `?`, not `No`, because an unopened/unloaded retainer can still contain it. Hovering the status explains which storage sources are unavailable. A coverage line under the table shows whether Dresser/Armoire/Saddlebag caches are currently usable, and **Refresh ownership** forces an immediate rescan.
+
+## Testing suggestions
+
+1. Pick an item you know is in normal Inventory/Armoury; it should show its location.
+2. Pick an item known to be in the Glamour Dresser. If Dresser says `not cached`, open the dresser once, then return to the Library / press **Refresh ownership**.
+3. At an inn, open the Armoire once and confirm a stored item shows `✓ Armoire` while the coverage line says `Armoire ✓`.
+4. Check a captured Facewear entry that your current character has unlocked; it should show `✓ Unlocked` beside Facewear.
+
+Unloaded retainers are still the main missing piece. A later pass can either consume FFXIV's retainer item-search cache directly or add optional Allagan Tools IPC for persistent/account-wide ownership.
+
+
+## M3.7.1 additions
+
+- Local 1–5 star ratings for Library captures. Ratings are personal Library metadata and are not added to shared GlamSpector export packages. Click the active star again to clear a rating.
+- `Rating` sort option (highest-rated first, newest first within the same rating).
+- Ownership rescans remain local-only: the button does **not** issue `/isearch` and does not request server data. Manual refresh has a short two-second UI cooldown, while the automatic local cache is reused for ten seconds to avoid needless repeated scans.
+- A future purge/cleanup action can safely build on the rating column; M3.7.1 intentionally does not auto-delete low-rated captures.
+
+
+## M3.7.4 Outfit ownership diagnostic
+
+FFXIV stores an Outfit Glamour as one Glamour Dresser slot plus a parallel unlock-bit field, so the ordinary cached item-ID list does not enumerate every constituent piece. Run `/glamspector ownership-debug` after opening the Glamour Dresser once. GlamSpector writes `GlamSpector-ownership-debug.txt` in its Dalamud config directory. This command only reads local client memory/game data; it does not run `/isearch` or query the server.
+
+
+## M3.7.4 diagnostic
+
+`/glamspector ownership-debug` now also inspects the live Glamour Dresser agent while the dresser is open. It compares the expanded `PrismBoxItems` list against the Scion Traveler set and reports `NumOutfitPiecesAdded`. This is local client-memory diagnostics only; it does not run `/isearch` or query the server.
+
+
+## M3.7.4
+- Reads the live Glamour Dresser PrismBox expanded item list when the Dresser is open.
+- Caches that expanded list for the current character for the rest of the session.
+- Pieces stored inside Outfit Glamours can now show `✓ Glamour Dresser (Outfit)`.
+- The cache is cleared when the logged-in character changes.
+- No `/isearch` command or server request is triggered by ownership refresh.
+
+
+## M3.7.7
+
+Expanded Glamour Dresser/Outfit ownership is persisted per character in `glamspector-ownership-cache.json`. Open the Dresser once and refresh ownership to seed/update the snapshot; future plugin reloads and game restarts restore it automatically. Re-open the Dresser after adding/removing Outfit items to refresh the saved snapshot.
+
+
+## M3.7.7
+
+- Added a small gear button in the Glamour Library toolbar that opens the existing GlamSpector Settings window.
+
+## M3.8.0 — Wanted items + ownership progress
+
+- Right-click any Library item and choose **Mark as wanted** / **Remove from wanted**.
+- Wanted status is personal Library metadata stored in SQLite and is never included in shared `.glamspector.zip` exports.
+- A **Wanted** window lists all wanted item appearances, current best-effort ownership status, and how many saved glams use each item.
+- The Wanted window can remove individual entries or clear items that GlamSpector can currently verify as owned.
+- Saved glams show a **verified ownership progress** count. Because unloaded retainers and other unavailable storage can still contain an item, unverified pieces are not labelled definitively missing.
+- The gear table shows a compact Wanted marker and provides a one-click **Mark unverified pieces wanted** helper for the selected glam.
+
+
+## M3.9.0 — Library filters, tags and notes
+
+- Added a collapsible **Filters** bar to the Glamour Library.
+- Filter by rating (Unrated or 1★+ through 5★), verified ownership completion, whether the glam contains Wanted items, and whether an Adventurer Plate is attached.
+- Added private per-glam **tags** (comma-separated, up to 30) and a private **note**.
+- Tags and notes are included in the live Library search-as-you-type.
+- Tags, notes, ratings and Wanted state remain personal Library metadata and are **not** included in shared `.glamspector.zip` exports.
+- Existing M3.x SQLite libraries migrate in place; no re-import is required.
+
+Suggested test: tag a glam `gothic, healer`, add a short note, search for a word that exists only in the tag/note, then try the Rating / Ownership / Wanted / Plate filters.
+
+## Glam Codes (M3.10)
+
+GlamSpector can share the visible outfit as a compact text string without sending a PNG/ZIP.
+
+- Select a structured Library glam and click **Copy Glam Code**.
+- Send the resulting `GS1:...` string through Discord/chat/etc.
+- The recipient opens **Import code**, pastes the string and chooses **Import to Library**.
+- A text-only Library entry is created with the visible gear, both dye channels and Facewear. It can be tried on, searched, ownership-checked, rated/tagged and added to Wanted just like a normal capture.
+- Glam Codes deliberately exclude screenshots, Adventurer Plates, character/world/FC identity, ratings, tags, notes and Wanted state. Those remain local/private.
+- The code includes a checksum so truncated or mistyped strings are rejected instead of silently importing the wrong outfit.
+
+The existing `.glamspector.zip` export remains the richer sharing format when you also want the Glam Card/Plate images and captured source metadata.
