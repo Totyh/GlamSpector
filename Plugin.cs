@@ -178,6 +178,25 @@ public sealed class Plugin : IDalamudPlugin
             Configuration.Version = 10;
         }
 
+        if (Configuration.Version < 11)
+        {
+            // M3.15 remembers useful Library presentation state. Existing users
+            // start with the established defaults; search text and transient UI
+            // state deliberately remain session-only.
+            Configuration.LibrarySortMode = 0;
+            Configuration.LibraryRatingFilter = 0;
+            Configuration.LibraryOwnershipFilter = 0;
+            Configuration.LibraryWantedFilter = 0;
+            Configuration.LibraryPlateFilter = 0;
+            Configuration.LibraryFiltersExpanded = false;
+            Configuration.LibraryListWidth = 360f;
+            Configuration.LibraryTagsNotesExpanded = false;
+            Configuration.LibraryFilesSharingExpanded = false;
+            Configuration.LibraryEntryExpanded = false;
+            Configuration.LibrarySelectedEntryId = 0;
+            Configuration.Version = 11;
+        }
+
         Configuration.Save();
 
         if (string.IsNullOrWhiteSpace(Configuration.OutputDirectory))

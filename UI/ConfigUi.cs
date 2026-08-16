@@ -29,7 +29,7 @@ public sealed class ConfigUi
             return;
         }
 
-        ImGui.TextWrapped("GlamSpector captures inspected glamours into a preview-first Library. M3.14 keeps character previews as the default visual, while full cards, personal previews, generated share cards, Adventurer Plates, ownership and Wanted data remain attached to each entry.");
+        ImGui.TextWrapped("GlamSpector captures inspected glamours into a preview-first Library. M3.15 adds editable local Library titles and remembers useful Library layout/filter state, while source identity, full cards, personal previews, generated share cards, Adventurer Plates, ownership and Wanted data remain attached to each entry.");
         ImGui.Spacing();
 
         ImGui.InputText("Output folder", ref outputDirectory, 1024);

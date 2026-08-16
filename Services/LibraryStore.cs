@@ -108,7 +108,8 @@ public sealed class LibraryStore
                 source_kind TEXT NULL,
                 source_url TEXT NULL,
                 source_title TEXT NULL,
-                source_creator TEXT NULL
+                source_creator TEXT NULL,
+                display_title TEXT NULL
             );
 
             CREATE TABLE IF NOT EXISTS library_pieces (
@@ -224,6 +225,27 @@ public sealed class LibraryStore
         EnsureColumn(connection, "library_entries", "source_url", "TEXT NULL");
         EnsureColumn(connection, "library_entries", "source_title", "TEXT NULL");
         EnsureColumn(connection, "library_entries", "source_creator", "TEXT NULL");
+        EnsureColumn(connection, "library_entries", "display_title", "TEXT NULL");
+
+        // M3.15 separates the user's local display title from capture/import
+        // identity. Preserve the exact old Character @ World label for existing
+        // non-EC entries. EC already has a dedicated source title/creator/URL, so
+        // its local title starts from that source title without the old synthetic
+        // "@ Eorzea Collection" suffix. No media or recipe data is rewritten.
+        using var backfillDisplayTitles = connection.CreateCommand();
+        backfillDisplayTitles.CommandText = """
+            UPDATE library_entries
+            SET display_title = CASE
+                WHEN source_kind = 'EorzeaCollection' COLLATE NOCASE THEN
+                    COALESCE(
+                        NULLIF(TRIM(source_title), ''),
+                        NULLIF(TRIM(character_name), ''),
+                        'Untitled glamour')
+                ELSE TRIM(character_name) || ' @ ' || TRIM(home_world)
+            END
+            WHERE display_title IS NULL OR TRIM(display_title) = '';
+            """;
+        backfillDisplayTitles.ExecuteNonQuery();
     }
 
     private static void EnsureColumn(SqliteConnection connection, string table, string column, string definition)
@@ -266,7 +288,8 @@ public sealed class LibraryStore
                     diagnostic_json_path,
                     facewear_id,
                     facewear_name,
-                    adventurer_plate_path
+                    adventurer_plate_path,
+                    display_title
                 ) VALUES (
                     $captured_at_utc,
                     $character_name,
@@ -277,7 +300,8 @@ public sealed class LibraryStore
                     $diagnostic_json_path,
                     $facewear_id,
                     $facewear_name,
-                    $adventurer_plate_path
+                    $adventurer_plate_path,
+                    $display_title
                 )
                 ON CONFLICT(card_path) DO UPDATE SET
                     captured_at_utc = excluded.captured_at_utc,
@@ -300,6 +324,7 @@ public sealed class LibraryStore
             insert.Parameters.AddWithValue("$facewear_id", snapshot.Facewear?.GlassesId0 ?? 0);
             insert.Parameters.AddWithValue("$facewear_name", DbValue(snapshot.Facewear?.DisplayName));
             insert.Parameters.AddWithValue("$adventurer_plate_path", DBNull.Value);
+            insert.Parameters.AddWithValue("$display_title", CreateDefaultDisplayTitle(snapshot.CharacterName, snapshot.HomeWorld));
             insert.ExecuteNonQuery();
         }
 
@@ -404,6 +429,11 @@ public sealed class LibraryStore
     public long AddEorzeaCollectionImport(EorzeaCollectionImportResult imported)
     {
         var normalizedCardPath = Path.GetFullPath(imported.CardPath);
+        // A row can already exist at the resolved card path even when an older
+        // or interrupted EC import never finished writing its source metadata.
+        // Treat either identity route as an existing entry so a local rename is
+        // never mistaken for a title that still needs initialization.
+        var entryExistedBeforeImport = ContainsCardPath(normalizedCardPath);
 
         // Treat the EC glamour ID as the stable identity, not the first image
         // filename. An import may initially have no downloadable picture (using
@@ -432,6 +462,7 @@ public sealed class LibraryStore
             using var reader = lookup.ExecuteReader();
             if (reader.Read())
             {
+                entryExistedBeforeImport = true;
                 var existingId = reader.GetInt64(0);
                 var existingCardPath = reader.GetString(1);
                 reader.Close();
@@ -458,13 +489,19 @@ public sealed class LibraryStore
                 SET source_kind = $source_kind,
                     source_url = $source_url,
                     source_title = $source_title,
-                    source_creator = $source_creator
+                    source_creator = $source_creator,
+                    display_title = CASE
+                        WHEN $set_initial_display_title = 1 THEN $display_title
+                        ELSE display_title
+                    END
                 WHERE id = $id;
                 """;
             update.Parameters.AddWithValue("$source_kind", "EorzeaCollection");
             update.Parameters.AddWithValue("$source_url", imported.SourceUrl);
             update.Parameters.AddWithValue("$source_title", imported.Title);
             update.Parameters.AddWithValue("$source_creator", DbValue(imported.Creator));
+            update.Parameters.AddWithValue("$set_initial_display_title", entryExistedBeforeImport ? 0 : 1);
+            update.Parameters.AddWithValue("$display_title", CreateInitialDisplayTitle(imported.Title, "Eorzea Collection glamour"));
             update.Parameters.AddWithValue("$id", entryId);
             update.ExecuteNonQuery();
         }
@@ -699,7 +736,8 @@ public sealed class LibraryStore
                 e.source_kind,
                 e.source_url,
                 e.source_title,
-                e.source_creator
+                e.source_creator,
+                e.display_title
             FROM library_entries e
             WHERE
                 $query = ''
@@ -708,6 +746,7 @@ public sealed class LibraryStore
                 OR e.free_company_name LIKE $like COLLATE NOCASE
                 OR e.facewear_name LIKE $like COLLATE NOCASE
                 OR e.notes LIKE $like COLLATE NOCASE
+                OR e.display_title LIKE $like COLLATE NOCASE
                 OR e.source_title LIKE $like COLLATE NOCASE
                 OR e.source_creator LIKE $like COLLATE NOCASE
                 OR e.source_url LIKE $like COLLATE NOCASE
@@ -849,7 +888,8 @@ public sealed class LibraryStore
                 e.source_kind,
                 e.source_url,
                 e.source_title,
-                e.source_creator
+                e.source_creator,
+                e.display_title
             FROM library_entries e
             WHERE e.id = $id;
             """;
@@ -1163,6 +1203,19 @@ public sealed class LibraryStore
         command.Parameters.AddWithValue("$rating", rating);
         command.Parameters.AddWithValue("$id", id);
         command.ExecuteNonQuery();
+    }
+
+    public void SetDisplayTitle(long id, string displayTitle)
+    {
+        var normalized = NormalizeDisplayTitle(displayTitle);
+
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText = "UPDATE library_entries SET display_title = $display_title WHERE id = $id;";
+        command.Parameters.AddWithValue("$display_title", normalized);
+        command.Parameters.AddWithValue("$id", id);
+        if (command.ExecuteNonQuery() == 0)
+            throw new InvalidOperationException("The selected Library entry no longer exists.");
     }
 
     public void SetNotes(long id, string? notes)
@@ -1986,12 +2039,24 @@ public sealed class LibraryStore
             ? parsed
             : DateTime.MinValue;
 
+        var characterName = reader.GetString(2);
+        var homeWorld = reader.GetString(3);
+        var sourceKind = reader.FieldCount > 14 ? GetNullableString(reader, 14) : null;
+        var sourceTitle = reader.FieldCount > 16 ? GetNullableString(reader, 16) : null;
+        var storedDisplayTitle = reader.FieldCount > 18 ? GetNullableString(reader, 18) : null;
+        var displayTitle = !string.IsNullOrWhiteSpace(storedDisplayTitle)
+            ? storedDisplayTitle.Trim()
+            : string.Equals(sourceKind, "EorzeaCollection", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(sourceTitle)
+                ? sourceTitle.Trim()
+                : CreateDefaultDisplayTitle(characterName, homeWorld);
+
         return new LibraryEntry
         {
             Id = reader.GetInt64(0),
             CapturedAtUtc = captured,
-            CharacterName = reader.GetString(2),
-            HomeWorld = reader.GetString(3),
+            DisplayTitle = displayTitle,
+            CharacterName = characterName,
+            HomeWorld = homeWorld,
             CardPath = reader.GetString(4),
             RawPreviewPath = GetNullableString(reader, 5),
             DiagnosticJsonPath = GetNullableString(reader, 6),
@@ -2002,11 +2067,34 @@ public sealed class LibraryStore
             PortraitSettings = DeserializePortraitSettings(GetNullableString(reader, 11)),
             Rating = reader.FieldCount > 12 && !reader.IsDBNull(12) ? Math.Clamp(reader.GetInt32(12), 0, 5) : 0,
             Notes = reader.FieldCount > 13 ? GetNullableString(reader, 13) : null,
-            SourceKind = reader.FieldCount > 14 ? GetNullableString(reader, 14) : null,
+            SourceKind = sourceKind,
             SourceUrl = reader.FieldCount > 15 ? GetNullableString(reader, 15) : null,
-            SourceTitle = reader.FieldCount > 16 ? GetNullableString(reader, 16) : null,
+            SourceTitle = sourceTitle,
             SourceCreator = reader.FieldCount > 17 ? GetNullableString(reader, 17) : null,
         };
+    }
+
+    private static string CreateDefaultDisplayTitle(string? characterName, string? homeWorld)
+    {
+        var character = string.IsNullOrWhiteSpace(characterName) ? "Unknown Character" : characterName.Trim();
+        var world = string.IsNullOrWhiteSpace(homeWorld) ? "Unknown World" : homeWorld.Trim();
+        return CreateInitialDisplayTitle($"{character} @ {world}", "Untitled glamour");
+    }
+
+    private static string CreateInitialDisplayTitle(string? displayTitle, string fallback)
+    {
+        var normalized = string.IsNullOrWhiteSpace(displayTitle) ? fallback : displayTitle.Trim();
+        return normalized.Length > 200 ? normalized[..200].TrimEnd() : normalized;
+    }
+
+    private static string NormalizeDisplayTitle(string? displayTitle)
+    {
+        var normalized = displayTitle?.Trim();
+        if (string.IsNullOrWhiteSpace(normalized))
+            throw new ArgumentException("Library title cannot be empty or whitespace.", nameof(displayTitle));
+        if (normalized.Length > 200)
+            throw new ArgumentException("Library title cannot exceed 200 characters.", nameof(displayTitle));
+        return normalized;
     }
 
     private static PortraitSettingsSnapshot? DeserializePortraitSettings(string? json)

@@ -7,6 +7,7 @@ public sealed class LibraryEntry
 {
     public long Id { get; init; }
     public DateTime CapturedAtUtc { get; init; }
+    public string DisplayTitle { get; init; } = "Untitled glamour";
     public string CharacterName { get; init; } = "Unknown Character";
     public string HomeWorld { get; init; } = "Unknown World";
     public string? FreeCompanyName { get; init; }

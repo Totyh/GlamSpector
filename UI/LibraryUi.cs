@@ -72,6 +72,12 @@ public sealed class LibraryUi
     private string notesEdit = string.Empty;
     private bool tagsEditDirty;
     private bool notesEditDirty;
+    private float libraryListWidth = 360f;
+    private bool restoreSelectionPending = true;
+    private bool applySecondarySectionState = true;
+    private long? editTitleEntryId;
+    private string titleEdit = string.Empty;
+    private string? titleEditError;
 
     private enum MediaViewMode
     {
@@ -152,6 +158,75 @@ public sealed class LibraryUi
         this.glamCodeService = glamCodeService;
         this.eorzeaCollectionImportService = eorzeaCollectionImportService;
         this.openSettings = openSettings;
+        RestoreUiState();
+    }
+
+    private void RestoreUiState()
+    {
+        var normalized = false;
+        sort = RestoreEnum(configuration.LibrarySortMode, LibrarySort.Newest, ref normalized);
+        ratingFilter = RestoreEnum(configuration.LibraryRatingFilter, RatingFilter.Any, ref normalized);
+        ownershipFilter = RestoreEnum(configuration.LibraryOwnershipFilter, OwnershipFilter.Any, ref normalized);
+        wantedFilter = RestoreEnum(configuration.LibraryWantedFilter, WantedFilter.Any, ref normalized);
+        plateFilter = RestoreEnum(configuration.LibraryPlateFilter, PlateFilter.Any, ref normalized);
+        showFilters = configuration.LibraryFiltersExpanded;
+        configuration.LibrarySortMode = (int)sort;
+        configuration.LibraryRatingFilter = (int)ratingFilter;
+        configuration.LibraryOwnershipFilter = (int)ownershipFilter;
+        configuration.LibraryWantedFilter = (int)wantedFilter;
+        configuration.LibraryPlateFilter = (int)plateFilter;
+
+        if (!float.IsFinite(configuration.LibraryListWidth) || configuration.LibraryListWidth < 240f)
+        {
+            libraryListWidth = 360f;
+            configuration.LibraryListWidth = libraryListWidth;
+            normalized = true;
+        }
+        else
+        {
+            libraryListWidth = configuration.LibraryListWidth;
+        }
+
+        if (configuration.LibrarySelectedEntryId < 0)
+        {
+            configuration.LibrarySelectedEntryId = 0;
+            normalized = true;
+        }
+
+        if (normalized)
+            SaveUiState();
+    }
+
+    private static T RestoreEnum<T>(int storedValue, T fallback, ref bool normalized)
+        where T : struct, Enum
+    {
+        if (Enum.IsDefined(typeof(T), storedValue))
+            return (T)Enum.ToObject(typeof(T), storedValue);
+        normalized = true;
+        return fallback;
+    }
+
+    private void SaveUiState()
+    {
+        try
+        {
+            configuration.Save();
+        }
+        catch (Exception ex)
+        {
+            // UI-memory persistence must never prevent the Library itself from
+            // opening or being used.
+            Plugin.Log.Warning(ex, "Could not save GlamSpector Library UI state.");
+        }
+    }
+
+    private void PersistFilters()
+    {
+        configuration.LibraryRatingFilter = (int)ratingFilter;
+        configuration.LibraryOwnershipFilter = (int)ownershipFilter;
+        configuration.LibraryWantedFilter = (int)wantedFilter;
+        configuration.LibraryPlateFilter = (int)plateFilter;
+        SaveUiState();
     }
 
     public void Open()
@@ -243,11 +318,26 @@ public sealed class LibraryUi
         ImGui.Separator();
 
         var available = ImGui.GetContentRegionAvail();
-        var listWidth = Math.Clamp(available.X * 0.32f, 320f, 430f);
+        const float splitterWidth = 7f;
+        var maximumListWidth = Math.Max(280f, available.X - 360f - splitterWidth - ImGui.GetStyle().ItemSpacing.X * 2f);
+        libraryListWidth = Math.Clamp(libraryListWidth, 280f, maximumListWidth);
 
-        if (ImGui.BeginChild("##GlamSpectorLibraryList", new Vector2(listWidth, 0), true))
+        if (ImGui.BeginChild("##GlamSpectorLibraryList", new Vector2(libraryListWidth, 0), true))
             DrawEntryList();
         ImGui.EndChild();
+
+        ImGui.SameLine();
+
+        ImGui.InvisibleButton("##GlamSpectorLibrarySplitter", new Vector2(splitterWidth, available.Y));
+        if (ImGui.IsItemActive())
+        {
+            libraryListWidth = Math.Clamp(libraryListWidth + ImGui.GetIO().MouseDelta.X, 280f, maximumListWidth);
+            configuration.LibraryListWidth = libraryListWidth;
+        }
+        if (ImGui.IsItemDeactivated())
+            SaveUiState();
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Drag to resize the Library list.");
 
         ImGui.SameLine();
 
@@ -271,7 +361,7 @@ public sealed class LibraryUi
         if (ImGui.InputText("Search##GlamSpectorLibrarySearch", ref search, 256))
             Refresh();
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("Search character/world, Free Company, item, slot, dye, Facewear, tags, notes, or imported source title/creator. Filtering updates as you type.");
+            ImGui.SetTooltip("Search Library title, character/world, Free Company, item, slot, dye, Facewear, tags, notes, or imported source title/creator. Filtering updates as you type.");
 
         ImGui.SameLine();
         if (ImGui.Button("Refresh"))
@@ -297,7 +387,11 @@ public sealed class LibraryUi
         ImGui.SameLine();
         var activeFilterCount = ActiveFilterCount();
         if (ImGui.Button(activeFilterCount > 0 ? $"Filters ({activeFilterCount})" : "Filters"))
+        {
             showFilters = !showFilters;
+            configuration.LibraryFiltersExpanded = showFilters;
+            SaveUiState();
+        }
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("Filter the Library by rating, ownership progress, wanted items, or Adventurer Plate availability.");
 
@@ -313,6 +407,8 @@ public sealed class LibraryUi
                 if (ImGui.Selectable(SortLabel(option), isSelected))
                 {
                     sort = option;
+                    configuration.LibrarySortMode = (int)sort;
+                    SaveUiState();
                     Refresh();
                 }
 
@@ -397,6 +493,7 @@ public sealed class LibraryUi
                 if (ImGui.Selectable(RatingFilterLabel(option), option == ratingFilter))
                 {
                     ratingFilter = option;
+                    PersistFilters();
                     ApplyFilters();
                 }
                 if (option == ratingFilter)
@@ -414,6 +511,7 @@ public sealed class LibraryUi
                 if (ImGui.Selectable(OwnershipFilterLabel(option), option == ownershipFilter))
                 {
                     ownershipFilter = option;
+                    PersistFilters();
                     ApplyFilters();
                 }
                 if (option == ownershipFilter)
@@ -431,6 +529,7 @@ public sealed class LibraryUi
                 if (ImGui.Selectable(WantedFilterLabel(option), option == wantedFilter))
                 {
                     wantedFilter = option;
+                    PersistFilters();
                     ApplyFilters();
                 }
                 if (option == wantedFilter)
@@ -448,6 +547,7 @@ public sealed class LibraryUi
                 if (ImGui.Selectable(PlateFilterLabel(option), option == plateFilter))
                 {
                     plateFilter = option;
+                    PersistFilters();
                     ApplyFilters();
                 }
                 if (option == plateFilter)
@@ -464,6 +564,7 @@ public sealed class LibraryUi
             ownershipFilter = OwnershipFilter.Any;
             wantedFilter = WantedFilter.Any;
             plateFilter = PlateFilter.Any;
+            PersistFilters();
             ApplyFilters();
         }
         ImGui.EndDisabled();
@@ -512,15 +613,10 @@ public sealed class LibraryUi
             _ => query,
         };
 
+        // Category filters and transient search both affect only the left list.
+        // The selected entry remains available in the details pane until an
+        // underlying store lookup confirms that the row itself was deleted.
         entries = query.ToList();
-        if (selected is not null && entries.All(entry => entry.Id != selected.Id))
-        {
-            selected = null;
-            tagsEditDirty = false;
-            notesEditDirty = false;
-            tagsEdit = string.Empty;
-            notesEdit = string.Empty;
-        }
     }
 
     private static string RatingFilterLabel(RatingFilter filter) => filter switch
@@ -587,7 +683,7 @@ public sealed class LibraryUi
             var progressText = progress.Total > 0
                 ? $"{progress.Owned}/{progress.Total} verified owned{(wantedCount > 0 ? $" · {wantedCount} wanted" : string.Empty)}{sizeSuffix}"
                 : $"No structured gear{sizeSuffix}";
-            var label = $"{entry.CharacterName} @ {entry.HomeWorld}\n{ratingText}{localTime}\n{progressText}##entry";
+            var label = $"{entry.DisplayTitle}\n{ratingText}{localTime}\n{progressText}##entry";
             if (ImGui.Selectable(label, selectedNow, ImGuiSelectableFlags.None, new Vector2(0, thumbnailHeight)))
                 Select(entry.Id);
 
@@ -649,9 +745,19 @@ public sealed class LibraryUi
             return;
         }
 
-        ImGui.TextUnformatted(entry.CharacterName);
-        ImGui.SameLine();
-        ImGui.TextDisabled($"@ {entry.HomeWorld}");
+        DrawEditableTitle(entry);
+
+        var isEorzeaCollectionEntry = string.Equals(entry.SourceKind, "EorzeaCollection", StringComparison.OrdinalIgnoreCase);
+        if (isEorzeaCollectionEntry)
+        {
+            var sourceTitle = string.IsNullOrWhiteSpace(entry.SourceTitle) ? "Eorzea Collection glamour" : entry.SourceTitle;
+            var creatorText = string.IsNullOrWhiteSpace(entry.SourceCreator) ? string.Empty : $" · by {entry.SourceCreator}";
+            ImGui.TextWrapped($"Source: {sourceTitle}{creatorText} · Eorzea Collection");
+        }
+        else
+        {
+            ImGui.TextDisabled($"Character: {entry.CharacterName} @ {entry.HomeWorld}");
+        }
 
         if (!string.IsNullOrWhiteSpace(entry.FreeCompanyName))
             ImGui.TextDisabled($"FC: {entry.FreeCompanyName}");
@@ -666,15 +772,6 @@ public sealed class LibraryUi
             ? $" · {entry.GeneratedShareCards.Count} share card{(entry.GeneratedShareCards.Count == 1 ? string.Empty : "s")}"
             : string.Empty;
         ImGui.TextDisabled($"Media: {FormatBytes(entry.TotalMediaBytes)}{previewCountText}{shareCardCountText}");
-
-        var isEorzeaCollectionEntry = string.Equals(entry.SourceKind, "EorzeaCollection", StringComparison.OrdinalIgnoreCase);
-        if (isEorzeaCollectionEntry)
-        {
-            var sourceText = "Imported from Eorzea Collection";
-            if (!string.IsNullOrWhiteSpace(entry.SourceCreator))
-                sourceText += $" · {entry.SourceCreator}";
-            ImGui.TextDisabled(sourceText);
-        }
 
         if (entry.PortraitSettings is not null)
             ImGui.TextDisabled("Portrait settings saved (read-only alpha)");
@@ -725,8 +822,69 @@ public sealed class LibraryUi
         DrawPiecesTable(entry);
 
         ImGui.Spacing();
-        if (DrawLibraryEntryManagement(entry))
+        var entryRemoved = DrawLibraryEntryManagement(entry);
+        applySecondarySectionState = false;
+        if (entryRemoved)
             return;
+    }
+
+    private void DrawEditableTitle(LibraryEntry entry)
+    {
+        if (editTitleEntryId == entry.Id)
+        {
+            ImGui.SetNextItemWidth(Math.Max(220f, Math.Min(520f, ImGui.GetContentRegionAvail().X - 150f)));
+            ImGui.InputText($"Library title##title-{entry.Id}", ref titleEdit, 256);
+
+            var valid = !string.IsNullOrWhiteSpace(titleEdit);
+            ImGui.BeginDisabled(!valid);
+            if (ImGui.SmallButton($"Save##saveTitle-{entry.Id}"))
+                SaveDisplayTitle(entry);
+            ImGui.EndDisabled();
+
+            ImGui.SameLine();
+            if (ImGui.SmallButton($"Cancel##cancelTitle-{entry.Id}"))
+                CancelDisplayTitleEdit();
+
+            if (!valid)
+                ImGui.TextDisabled("Library title cannot be empty.");
+            else if (!string.IsNullOrWhiteSpace(titleEditError))
+                ImGui.TextWrapped(titleEditError);
+            return;
+        }
+
+        ImGui.TextUnformatted(entry.DisplayTitle);
+        ImGui.SameLine();
+        if (ImGui.SmallButton($"Edit title##editTitle-{entry.Id}"))
+        {
+            editTitleEntryId = entry.Id;
+            titleEdit = entry.DisplayTitle;
+            titleEditError = null;
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Rename this entry in your local Library. Source attribution, recipe identity, media paths and sharing data are unchanged.");
+    }
+
+    private void SaveDisplayTitle(LibraryEntry entry)
+    {
+        try
+        {
+            store.SetDisplayTitle(entry.Id, titleEdit);
+            editTitleEntryId = null;
+            titleEdit = string.Empty;
+            titleEditError = null;
+            Refresh();
+        }
+        catch (Exception ex)
+        {
+            titleEditError = ex.Message;
+        }
+    }
+
+    private void CancelDisplayTitleEdit()
+    {
+        editTitleEntryId = null;
+        titleEdit = string.Empty;
+        titleEditError = null;
     }
 
     private void DrawGlamourActions(LibraryEntry entry)
@@ -770,7 +928,10 @@ public sealed class LibraryUi
 
     private void DrawEntryFileTools(LibraryEntry entry)
     {
-        if (!ImGui.CollapsingHeader($"Files & sharing##entryFiles-{entry.Id}"))
+        if (!BeginSecondarySection(
+                $"Files & sharing##entryFiles-{entry.Id}",
+                configuration.LibraryFilesSharingExpanded,
+                value => configuration.LibraryFilesSharingExpanded = value))
             return;
 
         var isGlamCodeEntry = LibraryStore.IsGlamCodePath(entry.CardPath);
@@ -831,7 +992,10 @@ public sealed class LibraryUi
     private bool DrawLibraryEntryManagement(LibraryEntry entry)
     {
         ImGui.Separator();
-        if (!ImGui.CollapsingHeader($"Library entry##entryManagement-{entry.Id}"))
+        if (!BeginSecondarySection(
+                $"Library entry##entryManagement-{entry.Id}",
+                configuration.LibraryEntryExpanded,
+                value => configuration.LibraryEntryExpanded = value))
             return false;
 
         ImGui.TextDisabled("Removal and deletion");
@@ -844,7 +1008,7 @@ public sealed class LibraryUi
                 try
                 {
                     store.Delete(entry.Id);
-                    selected = null;
+                    ClearSelection(persist: true);
                     confirmRemoveId = null;
                     confirmDeleteId = null;
                     Refresh();
@@ -871,7 +1035,7 @@ public sealed class LibraryUi
                 try
                 {
                     store.DeleteWithFiles(entry);
-                    selected = null;
+                    ClearSelection(persist: true);
                     confirmRemoveId = null;
                     confirmDeleteId = null;
                     Refresh();
@@ -913,7 +1077,11 @@ public sealed class LibraryUi
     private void DrawTagsAndNotes(LibraryEntry entry)
     {
         var tagCountText = entry.Tags.Count == 0 ? string.Empty : $" ({entry.Tags.Count} tag{(entry.Tags.Count == 1 ? string.Empty : "s")})";
-        if (!ImGui.CollapsingHeader($"Tags & notes{tagCountText}##metadata-{entry.Id}"))
+        var noteText = string.IsNullOrWhiteSpace(entry.Notes) ? string.Empty : " · note";
+        if (!BeginSecondarySection(
+                $"Tags & notes{tagCountText}{noteText}##metadata-{entry.Id}",
+                configuration.LibraryTagsNotesExpanded,
+                value => configuration.LibraryTagsNotesExpanded = value))
             return;
 
         ImGui.TextUnformatted("Tags");
@@ -945,6 +1113,20 @@ public sealed class LibraryUi
             ImGui.SameLine();
             ImGui.TextDisabled("Unsaved changes");
         }
+    }
+
+    private bool BeginSecondarySection(string label, bool configuredOpen, Action<bool> update)
+    {
+        if (applySecondarySectionState)
+            ImGui.SetNextItemOpen(configuredOpen, ImGuiCond.Always);
+
+        var open = ImGui.CollapsingHeader(label);
+        if (open != configuredOpen)
+        {
+            update(open);
+            SaveUiState();
+        }
+        return open;
     }
 
     private void SaveTags(LibraryEntry entry)
@@ -1774,15 +1956,28 @@ public sealed class LibraryUi
         ImGui.End();
     }
 
-    private void Select(long id)
+    private void Select(long id, bool persist = true)
     {
         try
         {
             selected = store.Get(id);
             if (selected is not null)
+            {
                 LoadMetadataEditors(selected, force: true);
+                if (persist && configuration.LibrarySelectedEntryId != selected.Id)
+                {
+                    configuration.LibrarySelectedEntryId = selected.Id;
+                    SaveUiState();
+                }
+            }
+            else if (persist)
+            {
+                ClearSelection(persist: true);
+            }
             mediaViewMode = MediaViewMode.Primary;
             selectedSourceImageIndex = 0;
+            applySecondarySectionState = true;
+            CancelDisplayTitleEdit();
             confirmDeletePersonalPreviewId = null;
             confirmDeleteShareCardId = null;
             confirmRemoveId = null;
@@ -1807,25 +2002,58 @@ public sealed class LibraryUi
 
             if (selectedId.HasValue)
             {
-                if (entries.Any(x => x.Id == selectedId.Value))
+                var refreshedSelection = store.Get(selectedId.Value);
+                if (refreshedSelection is not null)
                 {
-                    selected = store.Get(selectedId.Value);
-                    if (selected is not null)
-                        LoadMetadataEditors(selected);
+                    selected = refreshedSelection;
+                    LoadMetadataEditors(refreshedSelection);
                 }
                 else
                 {
-                    selected = null;
-                    tagsEditDirty = false;
-                    notesEditDirty = false;
+                    ClearSelection(persist: true);
                 }
             }
+            else if (restoreSelectionPending && configuration.LibrarySelectedEntryId > 0)
+            {
+                var restoredId = configuration.LibrarySelectedEntryId;
+                var restored = store.Get(restoredId);
+                if (restored is null)
+                {
+                    configuration.LibrarySelectedEntryId = 0;
+                    SaveUiState();
+                }
+                else
+                {
+                    selected = restored;
+                    LoadMetadataEditors(restored, force: true);
+                    applySecondarySectionState = true;
+                }
+            }
+
+            restoreSelectionPending = false;
         }
         catch (Exception ex)
         {
             allEntries = [];
             entries = [];
             lastError = ex.Message;
+        }
+    }
+
+    private void ClearSelection(bool persist)
+    {
+        selected = null;
+        tagsEditDirty = false;
+        notesEditDirty = false;
+        tagsEdit = string.Empty;
+        notesEdit = string.Empty;
+        applySecondarySectionState = true;
+        CancelDisplayTitleEdit();
+
+        if (persist && configuration.LibrarySelectedEntryId != 0)
+        {
+            configuration.LibrarySelectedEntryId = 0;
+            SaveUiState();
         }
     }
 

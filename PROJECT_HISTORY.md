@@ -213,6 +213,12 @@ The 3-across preview gallery was specifically chosen because tall character prev
 
 The Fitting Room crop was iteratively tuned to preserve the thin native frame while excluding the bottom circular controls; current value is `bottomRatio: 0.879`.
 
+### M3.15 — Library identity and memory
+
+Library entries gained a local, editable display title without replacing captured/imported identity. Existing non-EC entries retain their prior `Character @ World` label during migration; EC entries use their saved source title while source creator/title/URL remain separately preserved and displayed. Renaming is intentionally local and does not affect recipe identity, media paths, Glam Codes, sharing metadata, or duplicate detection.
+
+Useful navigation state now persists across reloads: sort, filters, filter-bar visibility, left-column width, selected entry when still available, and secondary-section expansion. Search text and transient edit/confirmation/dialog state remain session-only. Tags & notes are collapsed by default to protect the M3.13 visual hierarchy.
+
 ## Product/usability lessons so far
 
 1. **Feature hierarchy matters.** New features should be grouped by workflow rather than appended as another equal-priority button.

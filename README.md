@@ -1,5 +1,27 @@
 # GlamSpector
 
+## M3.15.0 — Library identity & memory
+
+- Adds a user-editable **Library title** to every entry. Use the compact **Edit title** action beside the selected title, then Save or Cancel. Empty titles are rejected.
+- Keeps the local Library title separate from captured/imported identity. Renaming does not change media paths, saved recipes, Glam Codes, package/share metadata, or duplicate detection.
+- Shows Eorzea Collection source title, creator (when available), and source identity separately from the editable local title. Re-importing the same EC glamour refreshes its source metadata without overwriting a user-renamed Library title.
+- Remembers the Library sort, rating/ownership/Wanted/Plate filters, filter-bar visibility, draggable left-column width, selected entry when it still exists, and the open/closed state of **Tags & notes**, **Files & sharing**, and **Library entry**.
+- Keeps search text, import/edit dialogs, confirmations, and other transient state session-only. Invalid saved UI values fall back to safe defaults.
+- Makes **Tags & notes** compact/collapsed by default while showing tag and note presence in its header.
+
+### M3.15 migration behavior
+
+- Existing SQLite libraries migrate in place by adding a nullable `display_title` column and backfilling it once. Existing non-EC entries retain their previous `Character @ World` visible label; EC entries use their saved source title without the synthetic `@ Eorzea Collection` suffix.
+- Existing source title/creator/URL, ratings, tags, notes, Wanted state, recipes, and all media paths/files are preserved. No re-import or file move is required.
+
+### Suggested M3.15 test
+
+1. Open an existing capture and confirm its familiar `Character @ World` title remains. Choose **Edit title**, save a custom title, reload the plugin, and confirm it persists. Verify Cancel discards an edit and whitespace-only text cannot be saved.
+2. Open an Eorzea Collection entry. Confirm its editable Library title does not include `@ Eorzea Collection`, while source title/creator attribution remains visible separately. Re-import the same page and confirm a custom Library title survives.
+3. Rename a structured entry, then verify Try On, Glam Code copy, media/open-folder actions, Share Cards, ratings/tags/notes/Wanted state, and duplicate discovery still behave independently of the title.
+4. Change sort and filters, resize the left column by dragging the divider, select an entry, and choose open/closed states for **Tags & notes**, **Files & sharing**, and **Library entry**. Reload the plugin and confirm those states return.
+5. Enter Library search text and open a rename/delete/import confirmation, then reload. Confirm search and transient edit/confirmation state are not restored.
+
 ## M3.14.0 — Preview-first Library
 
 - New managed captures **always keep the Inspect character preview** and use it as the Library image before the full Glam Card. The full card is retained as secondary/share media. The old **Save raw preview** setting now applies only when automatic Library indexing is disabled.

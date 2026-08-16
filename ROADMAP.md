@@ -1,53 +1,28 @@
 # ROADMAP.md — GlamSpector
 
-Current baseline: **M3.14.0, Preview-first Library**
+Current baseline: **M3.15.0, Library identity & memory**
 
 Version labels below are planning candidates and can change after discussion. Do not treat an unimplemented roadmap item as an approved behavior unless the user explicitly requests it.
 
-## Immediate engineering setup
+## Engineering baseline
 
-Before the next feature milestone:
+Completed before M3.15:
 
-- establish a working local Codex build environment;
-- identify/install the required .NET SDK for `Dalamud.NET.Sdk/15.0.0`;
-- verify `dotnet restore` and `dotnet build`;
-- capture any Dalamud-specific environment requirements;
-- make clean builds part of future milestone handoff.
+- established a working local Codex build environment;
+- confirmed .NET 10 and `Dalamud.NET.Sdk/15.0.0` against the XIVLauncher Dalamud development assemblies;
+- verified locked restore and Debug builds;
+- retained clean builds as part of milestone handoff.
 
-The first Codex task should be diagnostic only: inspect and build before changing files.
+## Completed in M3.15
+
+- Editable local Library titles are stored separately from captured/imported source identity.
+- Eorzea Collection source title, creator and URL remain source attribution and are displayed separately from the local title.
+- Existing Library rows migrate in place without moving media or requiring re-import.
+- Sort, filters, left-column width, selected entry and secondary-section expansion state are remembered with invalid-value fallbacks.
+- Search and transient dialogs/edit/confirmation state remain session-only.
+- Tags & notes are compact/collapsed by default.
 
 ## Short-term polish candidates
-
-These were identified after the M3.13/M3.14 UI work.
-
-### Editable entry identity
-
-Improve entries that arrive with weak titles such as `No Title @ Eorzea Collection`.
-
-Candidate behavior:
-- editable Library title;
-- source/creator attribution stored/displayed separately from the user-facing title;
-- imported source title preserved when available;
-- renaming should not change recipe/media identity.
-
-### Remember Library UI state
-
-Candidate state to persist:
-- left-column width;
-- filters/sort;
-- selected entry where sensible;
-- expansion state for secondary sections such as `Files & sharing` and `Library entry`;
-- possibly last-used media view where it improves navigation.
-
-Avoid surprising persistence if it makes the Library feel "stuck"; defaults should remain understandable.
-
-### Compact Tags & notes
-
-After the Library restructure, Tags & notes can still consume a lot of vertical space.
-
-Candidate:
-- collapsed/compact by default;
-- preserve fast access for users who use notes heavily.
 
 ### Filesystem resilience
 
