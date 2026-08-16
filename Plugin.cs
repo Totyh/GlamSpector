@@ -154,7 +154,17 @@ public sealed class Plugin : IDalamudPlugin
     public Plugin()
     {
         pluginLifetimeToken = pluginLifetimeCancellation.Token;
-        Configuration = PluginInterface.GetPluginConfig() as Configuration ?? new Configuration();
+        var savedConfiguration = PluginInterface.GetPluginConfig() as Configuration;
+        var hadSavedConfiguration = savedConfiguration is not null;
+        Configuration = savedConfiguration ?? new Configuration();
+        if (!hadSavedConfiguration)
+        {
+            // Establish a fresh installation's silent baseline before the
+            // constructor's existing early configuration saves. This remains
+            // quiet even if a later service initialization fails and Dalamud
+            // retries plugin loading.
+            Configuration.LastSeenPluginVersion = typeof(Plugin).Assembly.GetName().Version?.ToString();
+        }
         if (Configuration.Version < 4)
         {
             // Existing M3.x installs did not have automatic Plate settings. Opt
@@ -238,6 +248,14 @@ public sealed class Plugin : IDalamudPlugin
             Configuration.Version = 11;
         }
 
+        if (Configuration.Version < 12)
+        {
+            // M3.15.2 adds persisted plugin-version observation. Its bootstrap
+            // is handled after successful initialization so a genuinely fresh
+            // install can remain quiet while an existing install is recognized.
+            Configuration.Version = 12;
+        }
+
         Configuration.Save();
 
         if (string.IsNullOrWhiteSpace(Configuration.OutputDirectory))
@@ -300,7 +318,46 @@ public sealed class Plugin : IDalamudPlugin
         PluginInterface.UiBuilder.OpenMainUi += OpenMainUi;
         Framework.Update += OnFrameworkUpdate;
 
-        Log.Information("GlamSpector Milestone 3.15.1 loaded.");
+        HandleVersionUpdateNotification(hadSavedConfiguration);
+        Log.Information("GlamSpector Milestone 3.15.2 loaded.");
+    }
+
+    private void HandleVersionUpdateNotification(bool hadSavedConfiguration)
+    {
+        var currentVersion = typeof(Plugin).Assembly.GetName().Version;
+        if (currentVersion is null)
+            return;
+
+        var currentText = currentVersion.ToString();
+        var lastSeenText = Configuration.LastSeenPluginVersion?.Trim();
+        var shouldAnnounce = false;
+
+        if (string.IsNullOrWhiteSpace(lastSeenText))
+        {
+            // GetPluginConfig returning null is a reliable first-install signal
+            // for this configuration lifecycle. Existing installs upgrading to
+            // the first notification-aware build announce once; fresh installs
+            // silently establish their baseline.
+            shouldAnnounce = hadSavedConfiguration;
+        }
+        else if (System.Version.TryParse(lastSeenText, out var lastSeenVersion))
+        {
+            if (currentVersion < lastSeenVersion)
+                return; // A downgrade is not an update; retain the newer baseline.
+            if (currentVersion == lastSeenVersion)
+                return;
+            shouldAnnounce = currentVersion > lastSeenVersion;
+        }
+        else
+        {
+            // Malformed/legacy data is reset safely without claiming an update.
+            Log.Warning("Ignoring malformed last-seen GlamSpector version '{Version}'.", lastSeenText);
+        }
+
+        Configuration.LastSeenPluginVersion = currentText;
+        Configuration.Save();
+        if (shouldAnnounce)
+            ChatGui.Print($"GlamSpector updated to version {currentText}", "GlamSpector");
     }
 
     private void WriteOwnershipDiagnostic()
@@ -376,7 +433,6 @@ public sealed class Plugin : IDalamudPlugin
         PluginInterface.UiBuilder.OpenConfigUi -= configUi.Open;
         PluginInterface.UiBuilder.OpenMainUi -= OpenMainUi;
         Framework.Update -= OnFrameworkUpdate;
-        eorzeaCollectionImportService.Dispose();
         CommandManager.RemoveHandler(CommandName);
     }
 
@@ -1587,10 +1643,12 @@ public sealed class Plugin : IDalamudPlugin
             var previewBytes = await previewCaptureService.EncodePngAsync(texture, pluginLifetimeToken);
             EnsureInspectCaptureCanCommit(attempt);
 
-            var cardBytes = await glamCardRenderer.RenderAsync(
+            var renderedCapture = await glamCardRenderer.RenderCaptureAsync(
                 snapshot,
                 previewBytes,
-                Configuration.CleanupItemLevelOverlay);
+                Configuration.CleanupItemLevelOverlay,
+                pluginLifetimeToken);
+            var cardBytes = renderedCapture.CardPng;
             EnsureInspectCaptureCanCommit(attempt);
 
             string captureDirectory;
@@ -1625,11 +1683,17 @@ public sealed class Plugin : IDalamudPlugin
             var keepPreviewImage = (Configuration.AutoAddToLibrary && libraryStore is not null) || Configuration.SaveRawPreview;
             if (keepPreviewImage)
             {
+                // RenderCaptureAsync prepares this portrait once and uses that
+                // exact image for both the Full Card and the saved automatic
+                // Inspect preview. Personal Fitting Room previews remain on
+                // their independent native capture path.
+                var storedPreviewBytes = renderedCapture.PreparedPortraitPng;
+                EnsureInspectCaptureCanCommit(attempt);
                 Task writePreviewTask;
                 lock (captureLifecycleSync)
                 {
                     EnsureInspectCaptureCanCommit(attempt);
-                    writePreviewTask = File.WriteAllBytesAsync(rawPath, previewBytes, pluginLifetimeToken);
+                    writePreviewTask = File.WriteAllBytesAsync(rawPath, storedPreviewBytes, pluginLifetimeToken);
                 }
                 await writePreviewTask;
             }

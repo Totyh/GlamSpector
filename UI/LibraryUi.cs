@@ -51,7 +51,6 @@ public sealed class LibraryUi
     private bool showEorzeaCollectionImport;
     private string eorzeaCollectionUrl = string.Empty;
     private string eorzeaCollectionPageSource = string.Empty;
-    private bool showEorzeaCollectionBrowserFallback;
     private Task<EorzeaCollectionImportResult>? eorzeaCollectionImportTask;
     private int selectedSourceImageIndex;
     private long? confirmDeletePersonalPreviewId;
@@ -451,7 +450,7 @@ public sealed class LibraryUi
         if (ImGui.Selectable("Eorzea Collection…", false))
             showEorzeaCollectionImport = true;
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("Import one Eorzea Collection glamour URL. GlamSpector does not crawl the catalogue.");
+            ImGui.SetTooltip("Import one Eorzea Collection glamour from page source you copied in your browser. GlamSpector makes no EC network requests.");
 
         ImGui.EndPopup();
     }
@@ -1580,7 +1579,7 @@ public sealed class LibraryUi
         }
         else if (LibraryStore.IsEorzeaCollectionMarkerPath(entry.CardPath))
         {
-            ImGui.TextDisabled("Eorzea Collection import without a downloaded source image");
+            ImGui.TextDisabled("Eorzea Collection import without a local source image");
             ImGui.TextWrapped("The equipment recipe is available. Use Try on glam, compose the Fitting Room shot on your character, then press Capture my preview.");
         }
         else
@@ -2127,14 +2126,14 @@ public sealed class LibraryUi
 
     private void DrawEorzeaCollectionImportWindow()
     {
-        ImGui.SetNextWindowSize(new Vector2(720f, showEorzeaCollectionBrowserFallback ? 540f : 310f), ImGuiCond.FirstUseEver);
+        ImGui.SetNextWindowSize(new Vector2(720f, 560f), ImGuiCond.FirstUseEver);
         if (!ImGui.Begin("Import from Eorzea Collection###GlamSpectorImportEC", ref showEorzeaCollectionImport))
         {
             ImGui.End();
             return;
         }
 
-        ImGui.TextWrapped("Paste one Eorzea Collection glamour URL. GlamSpector downloads only that page and its glamour pictures, resolves the listed gear/dyes against your local FFXIV data, and stores the result in your Library.");
+        ImGui.TextWrapped("Eorzea Collection import is manual-only. Paste one glamour URL, open it in your normal browser, copy the full page source, then paste that HTML below. GlamSpector parses only the supplied HTML locally and performs no EC web or image requests.");
         ImGui.TextDisabled("Example: https://ffxiv.eorzeacollection.com/glamour/350011/petals-and-lace");
         ImGui.Spacing();
         ImGui.SetNextItemWidth(-1f);
@@ -2142,12 +2141,9 @@ public sealed class LibraryUi
 
         var busy = eorzeaCollectionImportTask is not null;
         ImGui.BeginDisabled(busy || string.IsNullOrWhiteSpace(eorzeaCollectionUrl));
-        if (ImGui.Button("Direct import"))
-            StartEorzeaCollectionImport();
+        if (ImGui.Button("Open in browser"))
+            OpenEorzeaCollectionInBrowser();
         ImGui.EndDisabled();
-        ImGui.SameLine();
-        if (ImGui.Button(showEorzeaCollectionBrowserFallback ? "Hide browser fallback" : "Browser fallback"))
-            showEorzeaCollectionBrowserFallback = !showEorzeaCollectionBrowserFallback;
         ImGui.SameLine();
         ImGui.BeginDisabled(busy);
         if (ImGui.Button("Clear"))
@@ -2160,42 +2156,42 @@ public sealed class LibraryUi
         if (ImGui.Button("Close"))
             showEorzeaCollectionImport = false;
 
-        if (showEorzeaCollectionBrowserFallback)
-        {
-            ImGui.Spacing();
-            ImGui.Separator();
-            ImGui.TextDisabled("Browser fallback for HTTP 403");
-            ImGui.TextWrapped("If the page opens normally in your browser but Direct import gets HTTP 403: open that same glamour page in the browser, press Ctrl+U (View Source), then Ctrl+A and Ctrl+C. Return here and paste the full page source below. GlamSpector parses only what you copied; it does not bypass the site's request protection.");
-            ImGui.Spacing();
-            ImGui.SetNextItemWidth(-1f);
-            ImGui.InputTextMultiline("##EorzeaCollectionPageSource", ref eorzeaCollectionPageSource, 4 * 1024 * 1024, new Vector2(-1f, 145f));
-            ImGui.BeginDisabled(busy || string.IsNullOrWhiteSpace(eorzeaCollectionUrl) || string.IsNullOrWhiteSpace(eorzeaCollectionPageSource));
-            if (ImGui.Button("Import pasted page source"))
-                StartEorzeaCollectionPageSourceImport();
-            ImGui.EndDisabled();
-            ImGui.SameLine();
-            ImGui.TextDisabled($"{eorzeaCollectionPageSource.Length:N0} characters pasted");
-        }
+        ImGui.Spacing();
+        ImGui.Separator();
+        ImGui.TextDisabled("Page source (required)");
+        ImGui.TextWrapped("In the browser, use View Source (usually Ctrl+U), then Ctrl+A and Ctrl+C. Paste the full HTML source here. A URL by itself is not imported or fetched by GlamSpector.");
+        ImGui.Spacing();
+        ImGui.SetNextItemWidth(-1f);
+        ImGui.InputTextMultiline("##EorzeaCollectionPageSource", ref eorzeaCollectionPageSource, 4 * 1024 * 1024, new Vector2(-1f, 210f));
+        ImGui.BeginDisabled(busy || string.IsNullOrWhiteSpace(eorzeaCollectionUrl) || string.IsNullOrWhiteSpace(eorzeaCollectionPageSource));
+        if (ImGui.Button("Import pasted page source"))
+            StartEorzeaCollectionPageSourceImport();
+        ImGui.EndDisabled();
+        ImGui.SameLine();
+        ImGui.TextDisabled($"{eorzeaCollectionPageSource.Length:N0} characters pasted");
 
         if (busy)
         {
             ImGui.Spacing();
-            ImGui.TextDisabled("Importing one page… downloading/parsing may take a few seconds.");
+            ImGui.TextDisabled("Parsing the pasted page source locally…");
         }
 
         ImGui.Spacing();
-        ImGui.TextDisabled("No catalogue crawling or bulk import is performed. Browser fallback requires you to copy the one page yourself; GlamSpector does not read browser cookies or automate the browser.");
+        ImGui.TextDisabled("No page fetch, image download, catalogue crawl, browser automation, or cookie access is performed.");
         ImGui.End();
     }
 
-    private void StartEorzeaCollectionImport()
+    private void OpenEorzeaCollectionInBrowser()
     {
-        if (eorzeaCollectionImportTask is not null)
-            return;
-
-        importStatus = "Importing Eorzea Collection glamour…";
-        lastError = null;
-        eorzeaCollectionImportTask = eorzeaCollectionImportService.ImportAsync(eorzeaCollectionUrl.Trim());
+        try
+        {
+            OpenExternalUrl(eorzeaCollectionImportService.NormalizePageUrl(eorzeaCollectionUrl));
+            lastError = null;
+        }
+        catch (Exception ex)
+        {
+            lastError = ex.Message;
+        }
     }
 
     private void StartEorzeaCollectionPageSourceImport()
@@ -2203,7 +2199,7 @@ public sealed class LibraryUi
         if (eorzeaCollectionImportTask is not null)
             return;
 
-        importStatus = "Importing Eorzea Collection glamour from copied page source…";
+        importStatus = "Parsing copied Eorzea Collection page source locally…";
         lastError = null;
         eorzeaCollectionImportTask = eorzeaCollectionImportService.ImportFromPageSourceAsync(
             eorzeaCollectionUrl.Trim(),
@@ -2222,7 +2218,7 @@ public sealed class LibraryUi
             var imported = task.GetAwaiter().GetResult();
             var entryId = store.AddEorzeaCollectionImport(imported);
             var warningText = imported.Warnings.Count > 0 ? $" Warning: {string.Join(" ", imported.Warnings)}" : string.Empty;
-            importStatus = $"Imported '{imported.Title}' from Eorzea Collection: {imported.Snapshot.Pieces.Count} gear piece{(imported.Snapshot.Pieces.Count == 1 ? string.Empty : "s")}, {imported.SourceImagePaths.Count} source image{(imported.SourceImagePaths.Count == 1 ? string.Empty : "s")}.{warningText}";
+            importStatus = $"Imported '{imported.Title}' from pasted Eorzea Collection page source: {imported.Snapshot.Pieces.Count} gear piece{(imported.Snapshot.Pieces.Count == 1 ? string.Empty : "s")}, {imported.SourceImagePaths.Count} retained local source image{(imported.SourceImagePaths.Count == 1 ? string.Empty : "s")}.{warningText}";
             lastError = null;
             eorzeaCollectionUrl = string.Empty;
             eorzeaCollectionPageSource = string.Empty;

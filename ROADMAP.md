@@ -1,6 +1,6 @@
 # ROADMAP.md — GlamSpector
 
-Current baseline: **M3.15.0, Library identity & memory**
+Current baseline: **M3.15.2, preview/import/update polish**
 
 Version labels below are planning candidates and can change after discussion. Do not treat an unimplemented roadmap item as an approved behavior unless the user explicitly requests it.
 
@@ -21,6 +21,15 @@ Completed before M3.15:
 - Sort, filters, left-column width, selected entry and secondary-section expansion state are remembered with invalid-value fallbacks.
 - Search and transient dialogs/edit/confirmation state remain session-only.
 - Tags & notes are compact/collapsed by default.
+- Inspect and Adventurer Plate capture lifecycles have bounded, entity-aware
+  cancellation and reload-safe cleanup (M3.15.1).
+- Automatic Inspect previews save the exact prepared portrait shared with the
+  Full Card, while personal Fitting Room previews retain their independent native
+  framed capture (M3.15.2).
+- Eorzea Collection import is manual-only from pasted HTML, with no plugin EC
+  page or image requests; existing cached media remains supported (M3.15.2).
+- Genuine version increases announce once in chat while fresh installs and
+  same-version reloads remain quiet (M3.15.2).
 
 ## Short-term polish candidates
 
@@ -114,8 +123,8 @@ Do not let Share Cards replace the independent saved recipe; they are derivative
 
 Unless explicitly reconsidered:
 
-- no bulk Eorzea Collection scraping;
-- no anti-bot bypass/cookie borrowing;
+- no automated Eorzea Collection page/image requests, crawling, scraping,
+  anti-bot bypass, or cookie borrowing;
 - no automatic chat-message sending;
 - no definitive "not owned" claims from incomplete storage coverage;
 - no forced migration that unnecessarily moves old user media;

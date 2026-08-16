@@ -466,6 +466,16 @@ public sealed class LibraryStore
                 var existingId = reader.GetInt64(0);
                 var existingCardPath = reader.GetString(1);
                 reader.Close();
+                // Manual-only EC imports never download replacement media. If
+                // an older entry already points at a valid cached source image,
+                // keep that image as its card rather than repointing it to a new
+                // image-less marker during metadata refresh.
+                if (imported.SourceImagePaths.Count == 0 &&
+                    !IsEorzeaCollectionMarkerPath(existingCardPath) &&
+                    File.Exists(existingCardPath))
+                {
+                    normalizedCardPath = Path.GetFullPath(existingCardPath);
+                }
                 if (!string.Equals(Path.GetFullPath(existingCardPath), normalizedCardPath, StringComparison.OrdinalIgnoreCase))
                 {
                     using var repoint = lookupConnection.CreateCommand();
@@ -506,23 +516,28 @@ public sealed class LibraryStore
             update.ExecuteNonQuery();
         }
 
-        using (var delete = connection.CreateCommand())
+        // An empty list now means no new media was supplied, not that the user
+        // asked to remove older cached EC images. Preserve legacy rows/paths.
+        if (imported.SourceImagePaths.Count > 0)
         {
-            delete.Transaction = transaction;
-            delete.CommandText = "DELETE FROM library_source_images WHERE entry_id = $entry_id;";
-            delete.Parameters.AddWithValue("$entry_id", entryId);
-            delete.ExecuteNonQuery();
-        }
+            using (var delete = connection.CreateCommand())
+            {
+                delete.Transaction = transaction;
+                delete.CommandText = "DELETE FROM library_source_images WHERE entry_id = $entry_id;";
+                delete.Parameters.AddWithValue("$entry_id", entryId);
+                delete.ExecuteNonQuery();
+            }
 
-        for (var i = 0; i < imported.SourceImagePaths.Count; i++)
-        {
-            using var insert = connection.CreateCommand();
-            insert.Transaction = transaction;
-            insert.CommandText = "INSERT INTO library_source_images (entry_id, ordinal, path) VALUES ($entry_id, $ordinal, $path);";
-            insert.Parameters.AddWithValue("$entry_id", entryId);
-            insert.Parameters.AddWithValue("$ordinal", i);
-            insert.Parameters.AddWithValue("$path", Path.GetFullPath(imported.SourceImagePaths[i]));
-            insert.ExecuteNonQuery();
+            for (var i = 0; i < imported.SourceImagePaths.Count; i++)
+            {
+                using var insert = connection.CreateCommand();
+                insert.Transaction = transaction;
+                insert.CommandText = "INSERT INTO library_source_images (entry_id, ordinal, path) VALUES ($entry_id, $ordinal, $path);";
+                insert.Parameters.AddWithValue("$entry_id", entryId);
+                insert.Parameters.AddWithValue("$ordinal", i);
+                insert.Parameters.AddWithValue("$path", Path.GetFullPath(imported.SourceImagePaths[i]));
+                insert.ExecuteNonQuery();
+            }
         }
 
         transaction.Commit();

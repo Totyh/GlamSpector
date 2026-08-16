@@ -2,7 +2,7 @@
   "Author": "Private development build",
   "Name": "GlamSpector",
   "Punchline": "Capture inspected glamours and keep a searchable Glamour Library.",
-  "Description": "Milestone 3.15.1 development build. Hardens native Inspect capture lifecycle handling with entity-bound preparation, bounded viewport capture cancellation, non-latching automatic Adventurer Plate deadlines, cache resets when Inspect disappears, and clearer diagnostics. Retains M3.15 editable Library titles and remembered Library UI state plus the preview-first Library, personal previews, generated Share Cards, Glam Codes, one-at-a-time Eorzea Collection import, Wanted items, ownership progress, Try On, ratings, tags/notes, and managed media. /glamspector library | config",
+  "Description": "Milestone 3.15.2 development build. Tightens automatic Inspect previews, makes Eorzea Collection import strictly manual from user-pasted page source with no plugin network requests, and adds a once-per-version update chat message. Retains capture lifecycle safeguards, editable Library titles and remembered Library UI state plus the preview-first Library, personal previews, generated Share Cards, Glam Codes, Wanted items, ownership progress, Try On, ratings, tags/notes, and managed media. /glamspector library | config",
   "ApplicableVersion": "any",
   "Tags": [
     "glamour",

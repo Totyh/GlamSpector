@@ -17,6 +17,20 @@ namespace GlamSpector.Services;
 
 public sealed class PreviewCaptureService
 {
+    // Fitting Room's native Preview component is a 200x328 frame with a 192x320
+    // CharaView image at (4,3). Its established whole-addon ratios resolve to
+    // this component-relative extraction rectangle, preserving the personal
+    // preview's current borders: 4.3 left, 3.9 top, 4.3 right and 1.18 bottom.
+    // Automatic CharacterInspect previews do not use this rule; they save the
+    // prepared portrait returned by GlamCardRenderer.
+    private const float NativePreviewComponentWidth = 200f;
+    private const float NativePreviewComponentHeight = 328f;
+    private const float NativeFramedPreviewLeft = -0.3f;
+    private const float NativeFramedPreviewTop = -0.9f;
+    private const float NativeFramedPreviewRight = 200.3f;
+    private const float NativeFramedPreviewBottom = 324.18f;
+    private const uint TryOnPreviewComponentNodeId = 31;
+
     private readonly IGameGui gameGui;
     private readonly ITextureProvider textureProvider;
     private readonly ITextureReadbackProvider readbackProvider;
@@ -243,12 +257,34 @@ public sealed class PreviewCaptureService
     }
 
     /// <summary>
-    /// Capture only the central character viewport from FFXIV's native Fitting
-    /// Room. The ratios deliberately include the thin native preview frame while
-    /// excluding the surrounding equipment-slot buttons, bottom action strip and title bar.
+    /// Capture the Fitting Room's native framed Preview component. Its previous
+    /// whole-addon ratios are retained as a fallback, but the normal path maps
+    /// the shared native frame rule directly from component node 31.
     /// </summary>
-    public CaptureRequest BeginTryOnCharacterCapture(CancellationToken cancellationToken = default) =>
-        BeginRelativeAddonCapture(
+    public unsafe CaptureRequest BeginTryOnCharacterCapture(CancellationToken cancellationToken = default)
+    {
+        var addon = gameGui.GetAddonByName<AtkUnitBase>("Tryon");
+        if (addon != null && addon->IsVisible)
+        {
+            var previewNode = addon->GetNodeById(TryOnPreviewComponentNodeId);
+            if (previewNode != null)
+            {
+                Bounds componentBounds = default;
+                previewNode->GetBounds(&componentBounds);
+                var framedBounds = GetNativeFramedPreviewBounds(
+                    componentBounds.Pos1.X,
+                    componentBounds.Pos1.Y,
+                    componentBounds.Pos2.X,
+                    componentBounds.Pos2.Y);
+                return BeginScreenBoundsCapture(
+                    framedBounds,
+                    "Fitting Room character preview",
+                    "Addon:Tryon:NativeFramedPreview",
+                    cancellationToken);
+            }
+        }
+
+        return BeginRelativeAddonCapture(
             "Tryon",
             "Fitting Room character preview",
             leftRatio: 0.205f,
@@ -257,6 +293,72 @@ public sealed class PreviewCaptureService
             bottomRatio: 0.879f,
             takeBeforeImGuiRender: true,
             cancellationToken: cancellationToken);
+    }
+
+    private CaptureRequest BeginScreenBoundsCapture(
+        PreviewScreenBounds bounds,
+        string debugName,
+        string boundsSource,
+        CancellationToken cancellationToken)
+    {
+        var viewport = ImGui.GetMainViewport();
+        var viewportPos = viewport.Pos;
+        var viewportSize = viewport.Size;
+        if (viewportSize.X <= 0 || viewportSize.Y <= 0)
+            throw new InvalidOperationException("The main game viewport is not ready.");
+
+        var uv0 = new NumericsVector2(
+            (bounds.Left - viewportPos.X) / viewportSize.X,
+            (bounds.Top - viewportPos.Y) / viewportSize.Y);
+        var uv1 = new NumericsVector2(
+            (bounds.Right - viewportPos.X) / viewportSize.X,
+            (bounds.Bottom - viewportPos.Y) / viewportSize.Y);
+        uv0 = NumericsVector2.Clamp(uv0, NumericsVector2.Zero, NumericsVector2.One);
+        uv1 = NumericsVector2.Clamp(uv1, NumericsVector2.Zero, NumericsVector2.One);
+        if (uv1.X <= uv0.X || uv1.Y <= uv0.Y)
+            throw new InvalidOperationException($"Calculated {debugName} crop is empty.");
+
+        var task = textureProvider.CreateFromImGuiViewportAsync(
+            new ImGuiViewportTextureArgs
+            {
+                ViewportId = viewport.ID,
+                AutoUpdate = false,
+                TakeBeforeImGuiRender = true,
+                KeepTransparency = false,
+                Uv0 = uv0,
+                Uv1 = uv1,
+            },
+            $"GlamSpector {debugName}",
+            cancellationToken);
+
+        return new CaptureRequest(task, new PreviewCaptureDiagnostics
+        {
+            BoundsSource = boundsSource,
+            Left = (int)bounds.Left,
+            Top = (int)bounds.Top,
+            Right = (int)bounds.Right,
+            Bottom = (int)bounds.Bottom,
+            Uv0X = uv0.X,
+            Uv0Y = uv0.Y,
+            Uv1X = uv1.X,
+            Uv1Y = uv1.Y,
+        });
+    }
+
+    private static PreviewScreenBounds GetNativeFramedPreviewBounds(
+        float componentLeft,
+        float componentTop,
+        float componentRight,
+        float componentBottom)
+    {
+        var width = componentRight - componentLeft;
+        var height = componentBottom - componentTop;
+        return new PreviewScreenBounds(
+            componentLeft + width * (NativeFramedPreviewLeft / NativePreviewComponentWidth),
+            componentTop + height * (NativeFramedPreviewTop / NativePreviewComponentHeight),
+            componentLeft + width * (NativeFramedPreviewRight / NativePreviewComponentWidth),
+            componentTop + height * (NativeFramedPreviewBottom / NativePreviewComponentHeight));
+    }
 
     public async Task<byte[]> EncodePngAsync(
         IDalamudTextureWrap texture,
@@ -308,3 +410,9 @@ public sealed class PreviewCaptureService
 public sealed record CaptureRequest(
     Task<IDalamudTextureWrap> TextureTask,
     PreviewCaptureDiagnostics Diagnostics);
+
+internal readonly record struct PreviewScreenBounds(
+    float Left,
+    float Top,
+    float Right,
+    float Bottom);

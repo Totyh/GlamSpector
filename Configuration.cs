@@ -13,7 +13,11 @@ public enum AdventurerPlateCaptureMode
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 11;
+    public int Version { get; set; } = 12;
+
+    // Assembly/plugin version last observed by this installation. This is kept
+    // separate from the configuration schema Version above.
+    public string? LastSeenPluginVersion { get; set; }
 
     public string OutputDirectory { get; set; } = string.Empty;
     public bool CopyToClipboard { get; set; } = true;

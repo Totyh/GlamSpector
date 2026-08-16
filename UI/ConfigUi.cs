@@ -46,7 +46,7 @@ public sealed class ConfigUi
         if (ImGui.Checkbox("Remove top-right item-level overlay from preview", ref cleanup))
             configuration.CleanupItemLevelOverlay = cleanup;
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("Post-processes the small top-right ilvl area before GlamSpector crops away the native silver preview frame. Disable this if the character, hair, hat, or weapon overlaps the ilvl digits.");
+            ImGui.SetTooltip("Post-processes the small top-right ilvl area in the portrait shared by the Full Card and automatic Inspect Preview. Disable this if the character, hair, hat, or weapon overlaps the ilvl digits.");
 
         var raw = configuration.SaveRawPreview;
         if (ImGui.Checkbox("Also save Inspect preview PNG for non-Library captures", ref raw))

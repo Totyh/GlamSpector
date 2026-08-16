@@ -8,9 +8,9 @@ This repository is developed iteratively with the user. Product/design decisions
 
 ## Current baseline
 
-- Current milestone at handoff: **M3.15.1**
+- Current milestone at handoff: **M3.15.2**
 - Project SDK: `Dalamud.NET.Sdk/15.0.0`
-- Project version: `0.3.15.1`
+- Project version: `0.3.15.2`
 - Current resolved target in `packages.lock.json`: `net10.0-windows7.0`
 - Important packages include `Microsoft.Data.Sqlite`, `SQLitePCLRaw.bundle_e_sqlite3`, `SixLabors.ImageSharp`, and `SixLabors.ImageSharp.Drawing`.
 
@@ -75,9 +75,12 @@ Do not change this into a definitive missing/not-owned claim unless all relevant
 
 ### Eorzea Collection import
 
-Eorzea Collection import is deliberately **one glamour page at a time**.
-
-If the site returns HTTP 403, GlamSpector must not bypass anti-bot protection, borrow browser cookies, or automate bulk scraping. The supported fallback is user-supplied page source from their browser.
+Eorzea Collection import is deliberately **manual-only**. GlamSpector may open
+one supplied glamour URL in the user's normal browser, but it must make no HTTP
+requests to EC and must not download EC images, read browser cookies, bypass
+anti-bot protection, crawl, or scrape. The only supported import input is page
+source that the user copied from their browser and pasted into GlamSpector for
+local parsing. Do not "improve" this policy back into automated fetching.
 
 ### Sharing/privacy
 
@@ -107,7 +110,13 @@ Important rules:
 - Full cards/source images are secondary/reference/share media.
 - Personal previews can generate **Share Cards** from the saved gear/dye/Facewear recipe.
 - Generated Share Cards are independent media files; deleting the source preview must not implicitly delete an already-generated Share Card.
-- The current Fitting Room preview crop uses `bottomRatio: 0.879`.
+- CharacterInspect's raw CharaView contains the native cyan item-level stamp.
+  `GlamCardRenderer.PreparePreview` is the single preparation path for both the
+  Full Card portrait and saved automatic Inspect Preview; do not add a second
+  standalone cleanup/crop algorithm.
+- Automatic Inspect previews are frame-free prepared portraits. Personal
+  Fitting Room previews remain native framed captures and use component node 31;
+  `bottomRatio: 0.879` remains their fallback only.
 
 Terminology matters:
 - "preview" means character/appearance imagery;

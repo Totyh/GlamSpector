@@ -225,6 +225,27 @@ Native capture state must always have a bounded exit path. Automatic Adventurer 
 
 CharacterInspect addon readiness is not content identity: the native addon/agent can remain allocated while its inspected entity and Examine data change. Future native capture work should validate the entity across preparation and sampling, clear observation caches when Inspect disappears, and include plugin-owned lifecycle state in diagnostics rather than reporting only addon visibility/readiness.
 
+### M3.15.2 — Preview/import/update polish
+
+CharacterInspect's raw CharaView contains the native cyan item-level stamp. The
+automatic Inspect Preview therefore saves the exact frame-free portrait produced
+once by `GlamCardRenderer.PreparePreview` for the Full Card, including the same
+configured cleanup behavior. Separate automatic-preview crop, masking and
+background-reconstruction experiments were removed. Personal Fitting Room
+previews remain independent native framed captures; their component-node path
+retains `bottomRatio: 0.879` as fallback.
+
+Eorzea Collection import is intentionally manual-only. GlamSpector may open a
+user-supplied page in the normal browser, but performs no EC HTTP requests or
+remote image downloads. It parses only HTML the user pastes and preserves any
+legacy cached source-image paths/files. This is a product/privacy policy, not a
+temporary fallback to be automated later.
+
+Plugin update messages use the running assembly version and a persisted
+last-seen version. A saved pre-M3.15.2 configuration reliably identifies an
+existing installation for the initial announcement; a genuinely new config is
+bootstrapped silently. Same-version reloads and downgrades do not announce.
+
 ## Product/usability lessons so far
 
 1. **Feature hierarchy matters.** New features should be grouped by workflow rather than appended as another equal-priority button.

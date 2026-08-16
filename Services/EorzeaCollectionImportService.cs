@@ -3,9 +3,6 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Net;
-using System.Net.Http;
-using System.Net.Http.Headers;
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -13,22 +10,17 @@ using System.Threading.Tasks;
 using Dalamud.Plugin.Services;
 using GlamSpector.Models;
 using Lumina.Excel.Sheets;
-using SixLabors.ImageSharp;
 
 namespace GlamSpector.Services;
 
 /// <summary>
-/// Imports one user-supplied Eorzea Collection glamour page at a time. It does
-/// not crawl catalogue/search pages. The importer uses the page's public HTML,
-/// resolves equipment/dyes against the local FFXIV sheets and stores copies of
-/// the glamour images in GlamSpector's plugin-data directory.
+/// Imports one user-supplied Eorzea Collection glamour page source at a time.
+/// GlamSpector never requests the page or its images: the user opens the page
+/// in their browser and pastes its HTML here for local parsing.
 /// </summary>
-public sealed class EorzeaCollectionImportService : IDisposable
+public sealed class EorzeaCollectionImportService
 {
     private const int MaxPageBytes = 4 * 1024 * 1024;
-    private const int MaxImageBytes = 20 * 1024 * 1024;
-    private const int MaxImageCandidates = 24;
-    private const int MaxSavedImages = 8;
 
     private static readonly Regex GlamourPathRegex = new(
         @"^/glamour/(?<id>\d+)(?:/[^/?#]+)?/?$",
@@ -53,18 +45,6 @@ public sealed class EorzeaCollectionImportService : IDisposable
     private static readonly Regex MetaRegex = new(
         """<meta\b[^>]*(?:property|name)\s*=\s*["'](?<name>[^"']+)["'][^>]*content\s*=\s*["'](?<content>[^"']*)["'][^>]*>|<meta\b[^>]*content\s*=\s*["'](?<content2>[^"']*)["'][^>]*(?:property|name)\s*=\s*["'](?<name2>[^"']+)["'][^>]*>""",
         RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase | RegexOptions.Singleline);
-
-    private static readonly Regex AttributeUrlRegex = new(
-        """(?:src|data-src|data-lazy-src)\s*=\s*["'](?<url>[^"']+)["']""",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase | RegexOptions.Singleline);
-
-    private static readonly Regex SrcSetRegex = new(
-        """(?:srcset|data-srcset)\s*=\s*["'](?<value>[^"']+)["']""",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase | RegexOptions.Singleline);
-
-    private static readonly Regex EmbeddedImageUrlRegex = new(
-        """https?:\\?/\\?/[^\s"'<>]+?(?:\.jpe?g|\.png|\.webp|\.avif)(?:\?[^\s"'<>]*)?""",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
 
     private static readonly Regex ByCreatorRegex = new(
         """\bby\s+(?<creator>[^\r\n<]{2,80}?)(?:\s+from\s+[«"']|\s*[|–—-]\s*Eorzea Collection|\r|\n|<)""",
@@ -106,51 +86,19 @@ public sealed class EorzeaCollectionImportService : IDisposable
 
     private readonly LookupData lookups;
     private readonly string importRoot;
-    private readonly HttpClient httpClient;
 
     public EorzeaCollectionImportService(IDataManager dataManager, string importRoot)
     {
         // Resolve game-data names once on plugin construction (the normal Dalamud
-        // thread) so the asynchronous HTTP continuation never needs to touch an
-        // IDataManager service from a worker thread.
+        // thread); pasted HTML can then be parsed without touching game data.
         lookups = BuildLookups(dataManager);
         this.importRoot = importRoot;
         Directory.CreateDirectory(importRoot);
-
-        var handler = new HttpClientHandler
-        {
-            AutomaticDecompression = DecompressionMethods.All,
-            AllowAutoRedirect = true,
-        };
-        httpClient = new HttpClient(handler)
-        {
-            Timeout = TimeSpan.FromSeconds(25),
-        };
-
-        // Identify the feature while still using a browser-compatible UA shape;
-        // some sites reject the default .NET user agent before serving HTML.
-        httpClient.DefaultRequestHeaders.UserAgent.ParseAdd(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-            "Chrome/139.0 Safari/537.36 GlamSpector/0.3.12.1");
-        httpClient.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("text/html"));
-        httpClient.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/xhtml+xml"));
-        httpClient.DefaultRequestHeaders.AcceptLanguage.ParseAdd("en-US,en;q=0.9");
-    }
-
-    public void Dispose() => httpClient.Dispose();
-
-    public async Task<EorzeaCollectionImportResult> ImportAsync(string inputUrl, CancellationToken cancellationToken = default)
-    {
-        var pageUri = ValidateUrl(inputUrl, out var glamourId);
-        var html = await DownloadPageAsync(pageUri, cancellationToken).ConfigureAwait(false);
-        return await ImportHtmlAsync(pageUri, glamourId, html, browserFallback: false, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
-    /// Fallback for sites that serve the page to the user's normal browser but
-    /// reject non-browser HTTP clients. The user explicitly copies that one
-    /// glamour page's HTML source from their browser and pastes it into
-    /// GlamSpector. No attempt is made to bypass the site's request filtering.
+    /// The user explicitly copies one glamour page's HTML source from their
+    /// browser and pastes it into GlamSpector. No network request is made.
     /// </summary>
     public async Task<EorzeaCollectionImportResult> ImportFromPageSourceAsync(
         string inputUrl,
@@ -161,27 +109,26 @@ public sealed class EorzeaCollectionImportService : IDisposable
         if (string.IsNullOrWhiteSpace(pageSource))
             throw new InvalidOperationException("Paste the copied Eorzea Collection page source first.");
 
-        // Keep the same safety ceiling as the direct HTTP path. Character count
-        // is checked first to avoid accepting an obviously huge clipboard value;
-        // the UTF-8 byte count is the authoritative limit.
+        // Character count is checked first to avoid accepting an obviously huge
+        // clipboard value; the UTF-8 byte count is the authoritative limit.
         if (pageSource.Length > MaxPageBytes || Encoding.UTF8.GetByteCount(pageSource) > MaxPageBytes)
             throw new InvalidOperationException("The pasted Eorzea Collection page source is larger than GlamSpector's 4 MB safety limit.");
 
-        return await ImportHtmlAsync(pageUri, glamourId, pageSource, browserFallback: true, cancellationToken).ConfigureAwait(false);
+        return await ImportHtmlAsync(pageUri, glamourId, pageSource, cancellationToken).ConfigureAwait(false);
     }
+
+    public string NormalizePageUrl(string inputUrl) => ValidateUrl(inputUrl, out _).AbsoluteUri;
 
     private async Task<EorzeaCollectionImportResult> ImportHtmlAsync(
         Uri pageUri,
         int glamourId,
         string html,
-        bool browserFallback,
         CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var title = ParseTitle(html) ?? $"Eorzea Collection Glamour #{glamourId}";
         var creator = ParseCreator(html);
         var warnings = new List<string>();
-        if (browserFallback)
-            warnings.Add("Imported from page source copied from your browser because direct plugin page requests are blocked by Eorzea Collection.");
 
         var pieces = ParsePieces(html, lookups, warnings);
         var facewear = ParseFacewear(html, lookups);
@@ -193,45 +140,23 @@ public sealed class EorzeaCollectionImportService : IDisposable
         var pageDirectory = Path.Combine(importRoot, glamourId.ToString());
         Directory.CreateDirectory(pageDirectory);
         var markerPath = Path.Combine(pageDirectory, $"{glamourId}.ecglam");
-        var previouslyCachedImages = Directory
+        var imagePaths = Directory
             .EnumerateFiles(pageDirectory, "source-*.png", SearchOption.TopDirectoryOnly)
             .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
             .ToList();
-
-        var imageUrls = ExtractImageUrls(html, pageUri);
-        var imagePaths = await DownloadImagesAsync(imageUrls, pageUri, pageDirectory, cancellationToken).ConfigureAwait(false);
 
         string cardPath;
         if (imagePaths.Count > 0)
         {
             cardPath = imagePaths[0];
-
-            // A successful refresh becomes the new authoritative local gallery.
-            // Delete only old numbered files that are no longer part of it. This
-            // happens after downloading so a transient network failure cannot wipe
-            // a previously useful cached import.
-            var keep = imagePaths
-                .Select(Path.GetFullPath)
-                .ToHashSet(StringComparer.OrdinalIgnoreCase);
-            foreach (var staleImage in previouslyCachedImages)
-            {
-                if (keep.Contains(Path.GetFullPath(staleImage)))
-                    continue;
-                try { File.Delete(staleImage); } catch { }
-            }
-            try { if (File.Exists(markerPath)) File.Delete(markerPath); } catch { }
-        }
-        else if (previouslyCachedImages.Count > 0)
-        {
-            imagePaths = previouslyCachedImages;
-            cardPath = imagePaths[0];
-            warnings.Add("The source pictures could not be refreshed, so GlamSpector kept the previously cached copies for this Eorzea Collection page.");
+            warnings.Add("Previously cached Eorzea Collection source images were retained; GlamSpector did not request remote images.");
         }
         else
         {
             cardPath = markerPath;
-            await File.WriteAllTextAsync(cardPath, pageUri.AbsoluteUri, cancellationToken).ConfigureAwait(false);
-            warnings.Add("No source image could be downloaded; the equipment recipe was imported without a picture.");
+            if (!File.Exists(cardPath))
+                await File.WriteAllTextAsync(cardPath, pageUri.AbsoluteUri, cancellationToken).ConfigureAwait(false);
+            warnings.Add("No local source image is available; the equipment recipe was imported without a picture.");
         }
 
         var snapshot = new GlamourSnapshot
@@ -284,35 +209,6 @@ public sealed class EorzeaCollectionImportService : IDisposable
             Fragment = string.Empty,
         };
         return builder.Uri;
-    }
-
-    private async Task<string> DownloadPageAsync(Uri uri, CancellationToken cancellationToken)
-    {
-        using var request = new HttpRequestMessage(HttpMethod.Get, uri);
-        request.Headers.Referrer = new Uri("https://ffxiv.eorzeacollection.com/");
-        using var response = await httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
-
-        if (response.StatusCode == HttpStatusCode.Forbidden)
-            throw new InvalidOperationException(
-                "Eorzea Collection returned HTTP 403 to the direct plugin request. The page may still work normally in your browser. " +
-                "Use the Browser fallback in Import EC: open the same page in your browser, press Ctrl+U, Ctrl+A, Ctrl+C, then paste the page source into GlamSpector.");
-
-        response.EnsureSuccessStatusCode();
-        if (response.Content.Headers.ContentLength is > MaxPageBytes)
-            throw new InvalidOperationException("The Eorzea Collection page response was unexpectedly large, so the import was stopped.");
-
-        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-        using var memory = new MemoryStream();
-        var buffer = new byte[32 * 1024];
-        int read;
-        while ((read = await stream.ReadAsync(buffer.AsMemory(), cancellationToken).ConfigureAwait(false)) > 0)
-        {
-            if (memory.Length + read > MaxPageBytes)
-                throw new InvalidOperationException("The Eorzea Collection page response exceeded GlamSpector's safety limit.");
-            memory.Write(buffer, 0, read);
-        }
-
-        return Encoding.UTF8.GetString(memory.ToArray());
     }
 
     private sealed class LookupData
@@ -729,152 +625,4 @@ public sealed class EorzeaCollectionImportService : IDisposable
         return null;
     }
 
-    private static List<Uri> ExtractImageUrls(string html, Uri pageUri)
-    {
-        var result = new List<Uri>();
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var forced = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-        void Add(string? raw, bool force = false)
-        {
-            if (string.IsNullOrWhiteSpace(raw))
-                return;
-            raw = WebUtility.HtmlDecode(raw.Trim());
-            if (raw.StartsWith("//", StringComparison.Ordinal))
-                raw = "https:" + raw;
-            if (!Uri.TryCreate(pageUri, raw, out var uri) || uri.Scheme != Uri.UriSchemeHttps)
-                return;
-
-            var path = uri.AbsolutePath.ToLowerInvariant();
-            var looksLikeImage = path.EndsWith(".jpg") || path.EndsWith(".jpeg") || path.EndsWith(".png") ||
-                                 path.EndsWith(".webp") || path.EndsWith(".avif") || path.Contains("/image") ||
-                                 path.Contains("/glamour");
-            if (!force && !looksLikeImage)
-                return;
-            if (path.Contains("logo") || path.Contains("favicon") || path.Contains("icon-") || path.Contains("avatar"))
-                return;
-
-            var key = uri.GetLeftPart(UriPartial.Path);
-            if (force)
-                forced.Add(key);
-            if (seen.Add(key))
-                result.Add(uri);
-        }
-
-        Add(GetMeta(html, "og:image"), force: true);
-        Add(GetMeta(html, "twitter:image"), force: true);
-
-        // Prefer the largest srcset candidate before the ordinary <img src>
-        // thumbnail. Many responsive sites list srcset widths from small to big.
-        foreach (Match match in SrcSetRegex.Matches(html))
-        {
-            var candidates = match.Groups["value"].Value.Split(',');
-            foreach (var candidate in candidates.Reverse())
-            {
-                var url = candidate.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
-                Add(url);
-            }
-        }
-
-        foreach (Match match in AttributeUrlRegex.Matches(html))
-            Add(match.Groups["url"].Value);
-
-        // Some frameworks serialize gallery URLs inside page-state JSON with
-        // escaped slashes rather than normal HTML attributes.
-        foreach (Match match in EmbeddedImageUrlRegex.Matches(html))
-            Add(match.Value.Replace("\\/", "/"));
-
-        // Keep the explicit social-preview image first, then favour EC's glamour
-        // image hosts/paths over generic page graphics. This prevents a busy page
-        // full of small gear icons from consuming the candidate budget before the
-        // rest of the submitted gallery is reached.
-        return result
-            .Select((uri, index) => new { Uri = uri, Index = index, Key = uri.GetLeftPart(UriPartial.Path) })
-            .OrderBy(candidate => forced.Contains(candidate.Key) ? 0 : ImageCandidatePriority(candidate.Uri))
-            .ThenBy(candidate => candidate.Index)
-            .Take(MaxImageCandidates)
-            .Select(candidate => candidate.Uri)
-            .ToList();
-    }
-
-    private static int ImageCandidatePriority(Uri uri)
-    {
-        if (uri.Host.StartsWith("cam.", StringComparison.OrdinalIgnoreCase))
-            return 1;
-        if (uri.AbsolutePath.Contains("/glamour", StringComparison.OrdinalIgnoreCase))
-            return 2;
-        return 3;
-    }
-
-    private async Task<List<string>> DownloadImagesAsync(
-        IReadOnlyList<Uri> imageUrls,
-        Uri pageUri,
-        string pageDirectory,
-        CancellationToken cancellationToken)
-    {
-        var results = new List<string>();
-        var hashes = new HashSet<string>(StringComparer.Ordinal);
-
-        foreach (var imageUri in imageUrls)
-        {
-            if (results.Count >= MaxSavedImages)
-                break;
-
-            try
-            {
-                using var request = new HttpRequestMessage(HttpMethod.Get, imageUri);
-                request.Headers.Referrer = pageUri;
-                request.Headers.Accept.ParseAdd("image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8");
-                using var response = await httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
-                if (!response.IsSuccessStatusCode)
-                    continue;
-                if (response.Content.Headers.ContentLength is > MaxImageBytes)
-                    continue;
-
-                var bytes = await ReadLimitedBytesAsync(response.Content, MaxImageBytes, cancellationToken).ConfigureAwait(false);
-                if (bytes.Length == 0)
-                    continue;
-
-                var hash = Convert.ToHexString(SHA256.HashData(bytes));
-                if (!hashes.Add(hash))
-                    continue;
-
-                using var image = Image.Load(bytes);
-                // Ignore logos, avatars and tiny thumbnails. EC glamour photos
-                // are comfortably above this size in normal use.
-                if (image.Width < 480 || image.Height < 360)
-                    continue;
-
-                var path = Path.Combine(pageDirectory, $"source-{results.Count + 1:00}.png");
-                image.SaveAsPng(path);
-                results.Add(path);
-            }
-            catch (OperationCanceledException)
-            {
-                throw;
-            }
-            catch
-            {
-                // A single gallery image being unavailable should not prevent
-                // importing the rest of the glamour page.
-            }
-        }
-
-        return results;
-    }
-
-    private static async Task<byte[]> ReadLimitedBytesAsync(HttpContent content, int limit, CancellationToken cancellationToken)
-    {
-        await using var stream = await content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-        using var memory = new MemoryStream();
-        var buffer = new byte[32 * 1024];
-        int read;
-        while ((read = await stream.ReadAsync(buffer.AsMemory(), cancellationToken).ConfigureAwait(false)) > 0)
-        {
-            if (memory.Length + read > limit)
-                return [];
-            memory.Write(buffer, 0, read);
-        }
-        return memory.ToArray();
-    }
 }

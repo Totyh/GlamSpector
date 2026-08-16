@@ -47,6 +47,45 @@ public sealed class GlamCardRenderer
     {
         using var sourcePreview = Image.Load<Rgba32>(previewPng.ToArray());
         using var preview = PreparePreview(sourcePreview, cleanItemLevelOverlay);
+        return await RenderPreparedCardAsync(
+            snapshot,
+            preview,
+            titleOverride,
+            subtitleOverride,
+            cancellationToken);
+    }
+
+    public async Task<GlamCardCaptureRenderResult> RenderCaptureAsync(
+        GlamourSnapshot snapshot,
+        ReadOnlyMemory<byte> previewPng,
+        bool cleanItemLevelOverlay,
+        CancellationToken cancellationToken = default)
+    {
+        using var sourcePreview = Image.Load<Rgba32>(previewPng.ToArray());
+        using var preparedPortrait = PreparePreview(sourcePreview, cleanItemLevelOverlay);
+
+        // The card and the standalone automatic Inspect preview consume the
+        // exact same prepared image. Encoding the portrait does not mutate it,
+        // so card composition remains byte-for-byte on the established path.
+        var cardPng = await RenderPreparedCardAsync(
+            snapshot,
+            preparedPortrait,
+            titleOverride: null,
+            subtitleOverride: null,
+            cancellationToken: cancellationToken);
+
+        await using var portraitOutput = new MemoryStream();
+        await preparedPortrait.SaveAsPngAsync(portraitOutput, cancellationToken);
+        return new GlamCardCaptureRenderResult(cardPng, portraitOutput.ToArray());
+    }
+
+    private async Task<byte[]> RenderPreparedCardAsync(
+        GlamourSnapshot snapshot,
+        Image<Rgba32> preview,
+        string? titleOverride,
+        string? subtitleOverride,
+        CancellationToken cancellationToken)
+    {
         using var card = new Image<Rgba32>(CardWidth, CardHeight, new Rgba32(17, 35, 48));
 
         var previewDest = FitInside(preview.Width, preview.Height, new Rectangle(72, 188, 495, 730));
@@ -336,3 +375,7 @@ public sealed class GlamCardRenderer
             height);
     }
 }
+
+public sealed record GlamCardCaptureRenderResult(
+    byte[] CardPng,
+    byte[] PreparedPortraitPng);

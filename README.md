@@ -1,5 +1,51 @@
 # GlamSpector
 
+## M3.15.2 — Preview/import/update polish
+
+- Automatic CharacterInspect capture now prepares its portrait once through
+  `GlamCardRenderer`: the Full Card and saved Inspect Preview consume the exact
+  same cleaned, native-frame-free image. The existing item-level cleanup setting
+  therefore affects both outputs consistently without a second masking path.
+- Keeps personal **Capture my preview** framing unchanged. Its normal path now
+  resolves the native Preview component directly; `bottomRatio: 0.879` remains
+  the compatibility fallback when that component node is unavailable.
+- When item-level cleanup is disabled, both the Full Card portrait and automatic
+  Inspect Preview retain the native CharacterInspect stamp.
+- Makes Eorzea Collection import strictly manual: open the supplied URL in the
+  normal browser, copy the page source, and paste the HTML into GlamSpector.
+  Parsing is local; GlamSpector performs no EC page fetch, remote image download,
+  browser-cookie access, crawling, scraping, or anti-bot bypass.
+- Preserves existing EC Library rows, source URLs, recipes, local DisplayTitles,
+  and previously cached source images. Manual re-import refreshes parsed source
+  metadata without deleting or replacing legacy media when no new media exists.
+- Prints `GlamSpector updated to version X` once when the running assembly version
+  genuinely increases. The last-seen version is stored in configuration;
+  same-version reloads and downgrades remain quiet. Existing pre-M3.15.2 configs
+  receive the M3.15.2 announcement once, while a first-ever install establishes
+  its version baseline silently.
+
+### Suggested M3.15.2 test
+
+1. Perform a normal Inspect capture with item-level cleanup enabled. Confirm the
+   automatic **Inspect Preview** matches the clean, frame-free portrait inside
+   the **Full Card**, and that the Full Card itself renders as before. Disable
+   cleanup and confirm both outputs consistently retain the native stamp.
+2. On a Library entry, use **Try on glam**, adjust the Fitting Room, and choose
+   **Capture my preview**. Confirm its established thin-frame crop is unchanged.
+3. Open **Import… → Eorzea Collection…**, enter a glamour URL, and confirm **Open
+   in browser** opens it. With only the URL supplied, confirm no import/fetch
+   occurs and the UI instructs you to paste page source.
+4. Copy the full browser page source and import it. Confirm equipment, both dye
+   channels, Facewear (when present), source title, creator, and original URL are
+   retained. Rename its Library DisplayTitle, repeat the manual import, and
+   confirm that local title survives.
+5. Open an older EC entry with cached source images and confirm those images
+   still display before and after manual re-import. No EC images should be
+   downloaded automatically.
+6. Upgrade from M3.15.1 and confirm one `GlamSpector updated to version 0.3.15.2`
+   chat message. Reload automatically or manually without changing the version
+   and confirm no second message appears. A fresh install should remain quiet.
+
 ## M3.15.1 — Capture lifecycle stability
 
 - Prevents automatic Adventurer Plate capture from leaving GlamSpector permanently busy if the Plate closes, loses data, or changes character during its render-settle period. A hard overall deadline remains active through the configured settle delay.
@@ -101,13 +147,16 @@
 5. Sort by **File size** and confirm the largest media-heavy entries appear first.
 
 
-## M3.11.1 - Eorzea Collection browser fallback
+## M3.11.1 - Eorzea Collection browser fallback (historical)
 
-Eorzea Collection may return HTTP 403 to a normal plugin HTTP client even when the same glamour page opens in the user's browser. GlamSpector does not try to bypass that protection or read browser cookies. The Import EC window now includes a manual browser fallback: open the one glamour page, use Ctrl+U / Ctrl+A / Ctrl+C to copy its HTML source, paste it into GlamSpector, and import from that source. The existing parser and image downloader are then used on the user-supplied page data.
+This milestone introduced pasted-page-source import after EC returned HTTP 403
+to plugin HTTP clients. M3.15.2 supersedes its automatic request and image-
+download behavior: pasted HTML is now the only import input and is parsed locally.
 
-# GlamSpector
+## M3.11.0 — Eorzea Collection import (historical)
 
-## M3.11.0 — Eorzea Collection import
+The network behavior below describes that historical release and is superseded
+by M3.15.2's strict manual-only policy.
 
 - Library toolbar: **Import EC**. Paste one URL like `https://ffxiv.eorzeacollection.com/glamour/350011/petals-and-lace`.
 - GlamSpector fetches only that single page (no catalogue crawl/bulk scraping), parses the visible equipment/dyes/Facewear when present, resolves names against local FFXIV sheets, and saves the result as a normal Library entry.
