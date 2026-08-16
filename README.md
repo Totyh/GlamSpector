@@ -1,5 +1,21 @@
 # GlamSpector
 
+## M3.15.1 — Capture lifecycle stability
+
+- Prevents automatic Adventurer Plate capture from leaving GlamSpector permanently busy if the Plate closes, loses data, or changes character during its render-settle period. A hard overall deadline remains active through the configured settle delay.
+- Binds Inspect capture preparation to the current inspected entity. Closing Inspect or changing characters before the viewport request completes cancels that attempt and requires a fresh capture.
+- Gives the Inspect viewport texture request a 10-second cancellation deadline and guarantees capture/focus/pending-request cleanup on timeout or failure. A cancelled request is discarded even if the underlying texture operation completes late.
+- Clears transient Facewear and Free Company observation caches when CharacterInspect disappears while preserving short-lived caching during one valid Inspect session.
+- Extends `/glamspector debug` and `/glamspector diag` with a concise second line describing GlamSpector's capture phase, entity, preparation, timeout and automatic Plate state.
+
+### Suggested M3.15.1 test
+
+1. Enable automatic Plate capture and set the Plate settle delay to 3 seconds. Capture character A, then close the Plate after its portrait appears but before settling finishes. Confirm GlamSpector reports the cancelled Plate attempt and the Inspect capture button becomes usable again without reloading.
+2. Repeat while opening another character's Plate or changing inspected targets during the settle period. Confirm the old attempt clears and never captures the replacement Plate.
+3. Start an Inspect capture and immediately close Inspect or switch from character A to character B. Confirm the attempt fails cleanly, does not later save A or B unexpectedly, and a fresh capture of B succeeds.
+4. Rapidly alternate two inspected characters with different gear/Facewear/Free Company data. Confirm saved recipes and metadata always match the entity captured after preparation.
+5. Run `/glamspector debug` while idle, preparing, capturing and during automatic Plate loading/settling. Confirm the native diagnostic is followed by the matching GlamSpector lifecycle state and elapsed/deadline information.
+
 ## M3.15.0 — Library identity & memory
 
 - Adds a user-editable **Library title** to every entry. Use the compact **Edit title** action beside the selected title, then Save or Cancel. Empty titles are rejected.

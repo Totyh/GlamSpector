@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Numerics;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Game.Command;
@@ -25,6 +26,8 @@ namespace GlamSpector;
 public sealed class Plugin : IDalamudPlugin
 {
     private const string CommandName = "/glamspector";
+    private const double InspectViewportCaptureTimeoutSeconds = 10.0;
+    private const double AutomaticPlateDeadlineGraceSeconds = 2.0;
 
     [PluginService] internal static IDalamudPluginInterface PluginInterface { get; private set; } = null!;
     [PluginService] internal static ICommandManager CommandManager { get; private set; } = null!;
@@ -51,21 +54,36 @@ public sealed class Plugin : IDalamudPlugin
     private readonly LibraryStore? libraryStore;
     private readonly LibraryUi? libraryUi;
     private readonly string? libraryInitializationError;
+    private readonly object captureLifecycleSync = new();
+    private readonly CancellationTokenSource pluginLifetimeCancellation = new();
+    private readonly CancellationToken pluginLifetimeToken;
+    private int pluginLifetimeOperations;
+    private int pluginLifetimeCancellationOperations;
+    private bool pluginLifetimeCleanupRequested;
+    private bool pluginLifetimeCancellationDisposed;
     private volatile bool captureInProgress;
     private volatile bool captureRequested;
     private PlateCapturePrompt? plateCapturePrompt;
     private AutoPlateCaptureState? autoPlateCapture;
     private InspectCapturePreparation? inspectCapturePreparation;
     private volatile bool captureReadyAfterInspectFocus;
-    private ushort previousFocusedAddonIdAfterCapture;
-    private ushort inspectAddonIdDuringCapture;
+    private uint captureReadyEntityId;
+    private long captureReadyGeneration;
+    private long nextInspectCaptureGeneration;
+    private long latestInspectCaptureGeneration;
+    private long focusOwnerGeneration;
+    private ushort focusedPreviousAddonId;
+    private ushort focusedInspectAddonId;
+    private InspectCaptureAttempt? activeInspectCapture;
     private TryOnQueueState? tryOnQueue;
     private PendingLibraryItemAction? pendingLibraryItemAction;
     private volatile bool personalPreviewCaptureInProgress;
+    private volatile bool disposed;
 
     private sealed class PlateCapturePrompt
     {
         public required long EntryId { get; init; }
+        public required long OriginatingInspectGeneration { get; init; }
         public required uint EntityId { get; init; }
         public required string CharacterName { get; init; }
         public required string HomeWorld { get; init; }
@@ -74,6 +92,7 @@ public sealed class Plugin : IDalamudPlugin
     private sealed class AutoPlateCaptureState
     {
         public required long EntryId { get; init; }
+        public required long OriginatingInspectGeneration { get; init; }
         public required uint EntityId { get; init; }
         public required string CharacterName { get; init; }
         public required string HomeWorld { get; init; }
@@ -84,11 +103,32 @@ public sealed class Plugin : IDalamudPlugin
 
     private sealed class InspectCapturePreparation
     {
+        public required long Generation { get; init; }
+        public required uint EntityId { get; init; }
+        public required DateTime StartedAtUtc { get; init; }
         public bool FocusApplied { get; set; }
         public int FramesRemaining { get; set; }
         public ushort PreviousFocusedAddonId { get; set; }
         public ushort InspectAddonId { get; set; }
     }
+
+    private sealed class InspectCaptureAttempt
+    {
+        public required long Generation { get; init; }
+        public required uint EntityId { get; init; }
+        public required DateTime StartedAtUtc { get; init; }
+        public required CancellationTokenSource Cancellation { get; init; }
+        public required CancellationToken Token { get; init; }
+        public bool TexturePending { get; set; } = true;
+        public bool ProviderTaskSettled { get; set; }
+        public bool CancellationRequested { get; set; }
+        public string? CancellationReason { get; set; }
+        public int CancellationOperations { get; set; }
+        public bool CleanupRequested { get; set; }
+        public bool CancellationDisposed { get; set; }
+    }
+
+    private readonly record struct FocusRestoreState(long Generation, ushort PreviousId, ushort InspectId);
 
     private sealed class TryOnQueueState
     {
@@ -113,6 +153,7 @@ public sealed class Plugin : IDalamudPlugin
 
     public Plugin()
     {
+        pluginLifetimeToken = pluginLifetimeCancellation.Token;
         Configuration = PluginInterface.GetPluginConfig() as Configuration ?? new Configuration();
         if (Configuration.Version < 4)
         {
@@ -259,7 +300,7 @@ public sealed class Plugin : IDalamudPlugin
         PluginInterface.UiBuilder.OpenMainUi += OpenMainUi;
         Framework.Update += OnFrameworkUpdate;
 
-        Log.Information("GlamSpector Milestone 3.14.0 loaded.");
+        Log.Information("GlamSpector Milestone 3.15.1 loaded.");
     }
 
     private void WriteOwnershipDiagnostic()
@@ -280,6 +321,57 @@ public sealed class Plugin : IDalamudPlugin
 
     public void Dispose()
     {
+        InspectCaptureAttempt? activeCapture;
+        lock (captureLifecycleSync)
+        {
+            if (disposed)
+                return;
+
+            // Publish disposal and invalidate every queued generation before
+            // cancellation can resume an asynchronous continuation.
+            disposed = true;
+            latestInspectCaptureGeneration = ++nextInspectCaptureGeneration;
+            captureRequested = false;
+            inspectCapturePreparation = null;
+            captureReadyAfterInspectFocus = false;
+            captureReadyGeneration = 0;
+            captureReadyEntityId = 0;
+            focusOwnerGeneration = 0;
+            focusedPreviousAddonId = 0;
+            focusedInspectAddonId = 0;
+            activeCapture = activeInspectCapture;
+            autoPlateCapture = null;
+            plateCapturePrompt = null;
+            personalPreviewCaptureInProgress = false;
+            pluginLifetimeCleanupRequested = true;
+            pluginLifetimeCancellationOperations++;
+        }
+
+        try
+        {
+            pluginLifetimeCancellation.Cancel();
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "A capture lifetime cancellation callback failed during unload.");
+        }
+        finally
+        {
+            CancellationTokenSource? disposeLifetimeCancellation;
+            lock (captureLifecycleSync)
+            {
+                pluginLifetimeCancellationOperations--;
+                disposeLifetimeCancellation = TryTakePluginLifetimeCancellationForDisposalLocked();
+            }
+            disposeLifetimeCancellation?.Dispose();
+        }
+
+        if (activeCapture is not null)
+        {
+            CancelInspectCaptureAttempt(activeCapture, "GlamSpector is unloading.");
+            _ = CompleteInspectCaptureAttempt(activeCapture);
+        }
+
         PluginInterface.UiBuilder.Draw -= Draw;
         PluginInterface.UiBuilder.OpenConfigUi -= configUi.Open;
         PluginInterface.UiBuilder.OpenMainUi -= OpenMainUi;
@@ -302,7 +394,11 @@ public sealed class Plugin : IDalamudPlugin
         {
             case "capture":
             case "snap":
-                captureRequested = true;
+                lock (captureLifecycleSync)
+                {
+                    if (!disposed)
+                        captureRequested = true;
+                }
                 break;
             case "library":
             case "lib":
@@ -319,6 +415,7 @@ public sealed class Plugin : IDalamudPlugin
             case "debug":
             case "diag":
                 ChatGui.Print(inspectReader.GetDiagnostics(), "GlamSpector");
+                ChatGui.Print(GetCaptureLifecycleDiagnostics(), "GlamSpector");
                 break;
             case "ownership-debug":
             case "owned-debug":
@@ -334,6 +431,7 @@ public sealed class Plugin : IDalamudPlugin
     private void Draw()
     {
         inspectReader.ObserveCurrentInspect();
+        CancelPendingInspectTextureIfInvalid();
 
         // Automatic Plate capture still needs ImGui viewport access, so it is
         // advanced from Draw. Native CharacterInspect focusing is deliberately
@@ -342,14 +440,27 @@ public sealed class Plugin : IDalamudPlugin
 
         // BeginCapture uses ImGui.GetMainViewport(), so after the framework-thread
         // focus preparation has completed we start the actual viewport capture here.
-        if (captureReadyAfterInspectFocus && !captureInProgress)
+        long readyGeneration = 0;
+        uint expectedEntityId = 0;
+        lock (captureLifecycleSync)
         {
-            captureReadyAfterInspectFocus = false;
-            StartCaptureNow();
+            if (captureReadyAfterInspectFocus && !captureInProgress && !disposed)
+            {
+                readyGeneration = captureReadyGeneration;
+                expectedEntityId = captureReadyEntityId;
+                captureReadyAfterInspectFocus = false;
+                captureReadyGeneration = 0;
+                captureReadyEntityId = 0;
+            }
         }
+        if (readyGeneration != 0)
+            StartCaptureNow(readyGeneration, expectedEntityId);
 
+        bool inspectCaptureBusy;
+        lock (captureLifecycleSync)
+            inspectCaptureBusy = inspectCapturePreparation is not null || captureInProgress;
         var suppressGlamSpectorUi = Configuration.HideGlamSpectorWindowsDuringCapture &&
-                                    (inspectCapturePreparation is not null || captureInProgress || autoPlateCapture is not null);
+                                    (inspectCaptureBusy || autoPlateCapture is not null);
 
         if (!suppressGlamSpectorUi)
         {
@@ -359,11 +470,283 @@ public sealed class Plugin : IDalamudPlugin
             DrawInspectCaptureButton();
         }
 
-        if (captureRequested && !captureInProgress && inspectCapturePreparation is null)
+        var startRequestedCapture = false;
+        lock (captureLifecycleSync)
         {
-            captureRequested = false;
-            TryStartCapture();
+            if (captureRequested && !captureInProgress && inspectCapturePreparation is null && !disposed)
+            {
+                captureRequested = false;
+                startRequestedCapture = true;
+            }
         }
+        if (startRequestedCapture)
+            TryStartCapture();
+    }
+
+    private void CancelPendingInspectTextureIfInvalid()
+    {
+        InspectCaptureAttempt? attempt;
+        lock (captureLifecycleSync)
+        {
+            attempt = activeInspectCapture;
+            if (attempt is null || !attempt.TexturePending || attempt.CancellationRequested)
+                return;
+        }
+
+        string? reason = null;
+        try
+        {
+            var currentEntityId = inspectReader.GetCurrentInspectEntityId();
+            if (currentEntityId != attempt.EntityId)
+                reason = "The inspected character changed before the preview capture completed. Start a fresh capture.";
+        }
+        catch
+        {
+            reason = "The Inspect window closed or became unavailable before the preview capture completed.";
+        }
+
+        if (reason is null)
+            return;
+
+        CancelInspectCaptureAttempt(attempt, reason, onlyWhileTexturePending: true);
+    }
+
+    private bool IsPluginLifetimeValid() => !pluginLifetimeToken.IsCancellationRequested;
+
+    private void QueueLifetimeFrameworkCallback(Action callback, long captureGeneration = 0)
+    {
+        lock (captureLifecycleSync)
+        {
+            if (disposed ||
+                pluginLifetimeToken.IsCancellationRequested ||
+                (captureGeneration != 0 && latestInspectCaptureGeneration != captureGeneration))
+            {
+                return;
+            }
+
+            _ = Framework.Run(() =>
+            {
+                lock (captureLifecycleSync)
+                {
+                    if (disposed ||
+                        pluginLifetimeToken.IsCancellationRequested ||
+                        (captureGeneration != 0 && latestInspectCaptureGeneration != captureGeneration))
+                    {
+                        return;
+                    }
+
+                    callback();
+                }
+            });
+        }
+    }
+
+    private void AcquirePluginLifetimeOperation()
+    {
+        lock (captureLifecycleSync)
+        {
+            if (disposed || pluginLifetimeToken.IsCancellationRequested)
+                throw new OperationCanceledException("GlamSpector is unloading.");
+            pluginLifetimeOperations++;
+        }
+    }
+
+    private void ReleasePluginLifetimeOperation()
+    {
+        CancellationTokenSource? disposeLifetimeCancellation;
+        lock (captureLifecycleSync)
+        {
+            if (pluginLifetimeOperations <= 0)
+                throw new InvalidOperationException("A GlamSpector lifetime operation was released more than once.");
+
+            pluginLifetimeOperations--;
+            disposeLifetimeCancellation = TryTakePluginLifetimeCancellationForDisposalLocked();
+        }
+        disposeLifetimeCancellation?.Dispose();
+    }
+
+    private CancellationTokenSource? TryTakePluginLifetimeCancellationForDisposalLocked()
+    {
+        if (!pluginLifetimeCleanupRequested ||
+            pluginLifetimeOperations != 0 ||
+            pluginLifetimeCancellationOperations != 0 ||
+            pluginLifetimeCancellationDisposed)
+        {
+            return null;
+        }
+
+        pluginLifetimeCancellationDisposed = true;
+        return pluginLifetimeCancellation;
+    }
+
+    private long AllocateInspectCaptureGeneration()
+    {
+        lock (captureLifecycleSync)
+        {
+            if (disposed)
+                throw new OperationCanceledException("GlamSpector is unloading.");
+            var generation = ++nextInspectCaptureGeneration;
+            latestInspectCaptureGeneration = generation;
+            return generation;
+        }
+    }
+
+    private bool IsCurrentGeneration(long generation)
+    {
+        lock (captureLifecycleSync)
+            return !disposed && generation != 0 && latestInspectCaptureGeneration == generation;
+    }
+
+    private void CancelInspectCaptureAttempt(
+        InspectCaptureAttempt attempt,
+        string reason,
+        bool onlyWhileTexturePending = false)
+    {
+        var cancel = false;
+        lock (captureLifecycleSync)
+        {
+            if (!ReferenceEquals(activeInspectCapture, attempt) ||
+                attempt.CancellationRequested ||
+                (onlyWhileTexturePending && !attempt.TexturePending))
+                return;
+
+            attempt.CancellationRequested = true;
+            attempt.CancellationReason = reason;
+            attempt.CancellationOperations++;
+            captureRequested = false;
+            captureReadyAfterInspectFocus = false;
+            captureReadyGeneration = 0;
+            captureReadyEntityId = 0;
+            cancel = true;
+        }
+
+        if (!cancel)
+            return;
+
+        try
+        {
+            attempt.Cancellation.Cancel();
+        }
+        finally
+        {
+            CancellationTokenSource? disposeCancellation = null;
+            lock (captureLifecycleSync)
+            {
+                attempt.CancellationOperations--;
+                if (attempt.CleanupRequested &&
+                    attempt.ProviderTaskSettled &&
+                    attempt.CancellationOperations == 0 &&
+                    !attempt.CancellationDisposed)
+                {
+                    attempt.CancellationDisposed = true;
+                    disposeCancellation = attempt.Cancellation;
+                }
+            }
+            disposeCancellation?.Dispose();
+        }
+    }
+
+    private FocusRestoreState CompleteInspectCaptureAttempt(InspectCaptureAttempt attempt)
+    {
+        CancellationTokenSource? disposeCancellation = null;
+        FocusRestoreState focusRestore = default;
+
+        lock (captureLifecycleSync)
+        {
+            if (ReferenceEquals(activeInspectCapture, attempt))
+            {
+                activeInspectCapture = null;
+                captureRequested = false;
+                inspectCapturePreparation = null;
+                captureReadyAfterInspectFocus = false;
+                captureReadyGeneration = 0;
+                captureReadyEntityId = 0;
+                focusRestore = TakeFocusRestoreStateLocked(attempt.Generation);
+
+                // Publish idle last. Every reader that can start a new attempt
+                // takes this same lock, so it sees a fully cleared old attempt.
+                captureInProgress = false;
+            }
+
+            attempt.CleanupRequested = true;
+            if (attempt.ProviderTaskSettled &&
+                attempt.CancellationOperations == 0 &&
+                !attempt.CancellationDisposed)
+            {
+                attempt.CancellationDisposed = true;
+                disposeCancellation = attempt.Cancellation;
+            }
+        }
+
+        disposeCancellation?.Dispose();
+        return focusRestore;
+    }
+
+    private void MarkInspectProviderTaskSettled(InspectCaptureAttempt attempt)
+    {
+        CancellationTokenSource? disposeCancellation = null;
+        lock (captureLifecycleSync)
+        {
+            attempt.TexturePending = false;
+            attempt.ProviderTaskSettled = true;
+            if (attempt.CleanupRequested &&
+                attempt.CancellationOperations == 0 &&
+                !attempt.CancellationDisposed)
+            {
+                attempt.CancellationDisposed = true;
+                disposeCancellation = attempt.Cancellation;
+            }
+        }
+        disposeCancellation?.Dispose();
+    }
+
+    private string GetCaptureLifecycleDiagnostics()
+    {
+        var now = DateTime.UtcNow;
+        bool inProgress;
+        bool requested;
+        bool ready;
+        uint readyEntityId;
+        long readyGeneration;
+        bool hasPreparation;
+        bool preparationFocused;
+        bool captureTexturePending;
+        string preparationText;
+        string captureText;
+        lock (captureLifecycleSync)
+        {
+            inProgress = captureInProgress;
+            requested = captureRequested;
+            ready = captureReadyAfterInspectFocus;
+            readyEntityId = captureReadyEntityId;
+            readyGeneration = captureReadyGeneration;
+            hasPreparation = inspectCapturePreparation is not null;
+            preparationFocused = inspectCapturePreparation?.FocusApplied == true;
+            captureTexturePending = activeInspectCapture?.TexturePending == true;
+            preparationText = inspectCapturePreparation is { } preparation
+                ? $"gen={preparation.Generation},entity=0x{preparation.EntityId:X8},focus={preparation.FocusApplied},frames={preparation.FramesRemaining},elapsed={(now - preparation.StartedAtUtc).TotalSeconds:0.0}s"
+                : "none";
+            captureText = activeInspectCapture is { } capture
+                ? $"gen={capture.Generation},entity=0x{capture.EntityId:X8},elapsed={(now - capture.StartedAtUtc).TotalSeconds:0.0}s/{InspectViewportCaptureTimeoutSeconds:0.0}s,pending={capture.TexturePending},cancel={capture.CancellationRequested}"
+                : "none";
+        }
+        var plate = autoPlateCapture;
+        var phase = inProgress
+            ? captureTexturePending ? "inspect-texture" : "inspect-processing"
+            : plate is not null
+                ? plate.ReadySinceUtc.HasValue ? "plate-settle" : "plate-load"
+                : hasPreparation
+                    ? preparationFocused ? "inspect-wait" : "inspect-focus"
+                    : ready
+                        ? "inspect-ready"
+                        : requested ? "requested" : "idle";
+
+        var plateText = plate is null
+            ? "none"
+            : $"gen={plate.OriginatingInspectGeneration},entity=0x{plate.EntityId:X8},ready={plate.ReadySinceUtc.HasValue},elapsed={(now - plate.StartedAtUtc).TotalSeconds:0.0}s/{GetAutomaticPlateOverallTimeoutSeconds():0.0}s";
+
+        return $"Capture lifecycle: phase={phase}; inProgress={inProgress}; requested={requested}; " +
+               $"prep=[{preparationText}]; ready=[gen={readyGeneration},entity=0x{readyEntityId:X8}]; capture=[{captureText}]; plate=[{plateText}].";
     }
 
     private void DrawInspectCaptureButton()
@@ -372,7 +755,10 @@ public sealed class Plugin : IDalamudPlugin
         if (inspect.IsNull || !inspect.IsVisible || inspect.ScaledSize.X <= 0 || inspect.ScaledSize.Y <= 0)
             return;
 
-        var busy = captureInProgress || inspectCapturePreparation is not null || autoPlateCapture is not null || plateCapturePrompt is not null;
+        bool captureBusy;
+        lock (captureLifecycleSync)
+            captureBusy = captureInProgress || inspectCapturePreparation is not null;
+        var busy = captureBusy || autoPlateCapture is not null || plateCapturePrompt is not null;
 
         var buttonSize = new Vector2(
             inspect.ScaledSize.X * 0.348f,
@@ -399,7 +785,9 @@ public sealed class Plugin : IDalamudPlugin
             if (ImGui.Begin("###GlamSpectorInspectCapture", flags))
             {
                 ImGui.BeginDisabled(busy);
-                var buttonText = captureInProgress ? "Capturing…" : inspectCapturePreparation is not null ? "Preparing…" : autoPlateCapture is not null ? "Plate…" : plateCapturePrompt is not null ? "Plate?" : "Capture";
+                string buttonText;
+                lock (captureLifecycleSync)
+                    buttonText = captureInProgress ? "Capturing…" : inspectCapturePreparation is not null ? "Preparing…" : autoPlateCapture is not null ? "Plate…" : plateCapturePrompt is not null ? "Plate?" : "Capture";
                 if (ImGui.Button(buttonText, buttonSize))
                     TryStartCapture();
                 ImGui.EndDisabled();
@@ -417,7 +805,12 @@ public sealed class Plugin : IDalamudPlugin
 
     private void TryStartCapture()
     {
-        if (captureInProgress || inspectCapturePreparation is not null || autoPlateCapture is not null || plateCapturePrompt is not null)
+        lock (captureLifecycleSync)
+        {
+            if (disposed || captureInProgress || inspectCapturePreparation is not null)
+                return;
+        }
+        if (autoPlateCapture is not null || plateCapturePrompt is not null)
             return;
 
         if (Configuration.BringInspectToFrontBeforeCapture)
@@ -434,7 +827,7 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-        StartCaptureNow();
+        StartCaptureNow(AllocateInspectCaptureGeneration(), 0);
     }
 
     private void BeginInspectCapturePreparation()
@@ -444,18 +837,29 @@ public sealed class Plugin : IDalamudPlugin
         // addon lists at that point can invalidate the structures being iterated.
         // We only queue the request here and perform the native call on the next
         // Framework.Update tick.
-        inspectCapturePreparation = new InspectCapturePreparation
+        var entityId = inspectReader.GetCurrentInspectEntityId();
+        var generation = AllocateInspectCaptureGeneration();
+        lock (captureLifecycleSync)
         {
-            FocusApplied = false,
-            FramesRemaining = 2,
-            PreviousFocusedAddonId = 0,
-            InspectAddonId = 0,
-        };
+            inspectCapturePreparation = new InspectCapturePreparation
+            {
+                Generation = generation,
+                EntityId = entityId,
+                StartedAtUtc = DateTime.UtcNow,
+                FocusApplied = false,
+                FramesRemaining = 2,
+                PreviousFocusedAddonId = 0,
+                InspectAddonId = 0,
+            };
+        }
     }
 
     private void OnFrameworkUpdate(IFramework framework)
     {
-        if (inspectCapturePreparation is not null)
+        InspectCapturePreparation? preparation;
+        lock (captureLifecycleSync)
+            preparation = inspectCapturePreparation;
+        if (preparation is not null)
         {
             try
             {
@@ -463,12 +867,30 @@ public sealed class Plugin : IDalamudPlugin
             }
             catch (Exception ex)
             {
-                inspectCapturePreparation = null;
-                captureReadyAfterInspectFocus = false;
-                previousFocusedAddonIdAfterCapture = 0;
-                inspectAddonIdDuringCapture = 0;
-                Log.Error(ex, "Could not prepare CharacterInspect for GlamSpector capture on the framework thread.");
-                ChatGui.PrintError($"Could not prepare Inspect for capture: {ex.Message}", "GlamSpector");
+                var reportFailure = false;
+                lock (captureLifecycleSync)
+                {
+                    if (ReferenceEquals(inspectCapturePreparation, preparation))
+                    {
+                        inspectCapturePreparation = null;
+                        captureReadyAfterInspectFocus = false;
+                        captureReadyGeneration = 0;
+                        captureReadyEntityId = 0;
+                        captureRequested = false;
+                        if (!disposed && latestInspectCaptureGeneration == preparation.Generation)
+                        {
+                            RestorePreviousFocusedAddon(
+                                preparation.PreviousFocusedAddonId,
+                                preparation.InspectAddonId);
+                            reportFailure = true;
+                        }
+                    }
+                }
+                if (reportFailure)
+                {
+                    Log.Error(ex, "Could not prepare CharacterInspect for GlamSpector capture on the framework thread.");
+                    ChatGui.PrintError($"Could not prepare Inspect for capture: {ex.Message}", "GlamSpector");
+                }
             }
         }
 
@@ -503,8 +925,24 @@ public sealed class Plugin : IDalamudPlugin
 
     private unsafe void UpdateInspectCapturePreparationOnFrameworkThread()
     {
-        if (inspectCapturePreparation is not { } state)
+        lock (captureLifecycleSync)
+        {
+            UpdateInspectCapturePreparationOnFrameworkThreadLocked();
+        }
+    }
+
+    private unsafe void UpdateInspectCapturePreparationOnFrameworkThreadLocked()
+    {
+        var state = inspectCapturePreparation;
+        if (state is null || disposed || latestInspectCaptureGeneration != state.Generation)
             return;
+
+        var currentEntityId = inspectReader.GetCurrentInspectEntityId();
+        if (currentEntityId != state.EntityId)
+        {
+            throw new InvalidOperationException(
+                "The inspected character changed while capture was being prepared. Start a fresh capture.");
+        }
 
         if (!state.FocusApplied)
         {
@@ -536,14 +974,26 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-        previousFocusedAddonIdAfterCapture = state.PreviousFocusedAddonId;
-        inspectAddonIdDuringCapture = state.InspectAddonId;
+        if (!ReferenceEquals(inspectCapturePreparation, state) || disposed ||
+            latestInspectCaptureGeneration != state.Generation)
+        {
+            return;
+        }
+
+        focusOwnerGeneration = state.Generation;
+        focusedPreviousAddonId = state.PreviousFocusedAddonId;
+        focusedInspectAddonId = state.InspectAddonId;
         inspectCapturePreparation = null;
+        captureReadyGeneration = state.Generation;
+        captureReadyEntityId = state.EntityId;
         captureReadyAfterInspectFocus = true;
     }
 
     private void CapturePersonalPreview(LibraryEntry entry)
     {
+        if (!IsPluginLifetimeValid())
+            return;
+
         if (libraryStore is null)
         {
             ChatGui.PrintError("The GlamSpector Library is unavailable.", "GlamSpector");
@@ -556,20 +1006,35 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
+        var lifetimeOperationHeld = false;
         try
         {
             // This samples the native Fitting Room's central character viewport
             // before Dalamud ImGui is drawn, so the Library itself can remain
             // open while the user composes the shot. It never re-runs Try On;
             // the current rotation/zoom is captured exactly as the player left it.
-            var request = previewCaptureService.BeginTryOnCharacterCapture();
-            personalPreviewCaptureInProgress = true;
-            _ = FinishPersonalPreviewCaptureAsync(entry.Id, request);
+            AcquirePluginLifetimeOperation();
+            lifetimeOperationHeld = true;
+            lock (captureLifecycleSync)
+            {
+                if (disposed || pluginLifetimeToken.IsCancellationRequested)
+                    throw new OperationCanceledException("GlamSpector is unloading.");
+
+                var request = previewCaptureService.BeginTryOnCharacterCapture(pluginLifetimeToken);
+                personalPreviewCaptureInProgress = true;
+                _ = FinishPersonalPreviewCaptureAsync(entry.Id, request);
+                lifetimeOperationHeld = false;
+            }
         }
         catch (Exception ex)
         {
-            Log.Error(ex, "Could not start Fitting Room personal preview capture.");
-            ChatGui.PrintError($"Could not capture Fitting Room preview: {ex.Message}", "GlamSpector");
+            if (lifetimeOperationHeld)
+                ReleasePluginLifetimeOperation();
+            if (IsPluginLifetimeValid())
+            {
+                Log.Error(ex, "Could not start Fitting Room personal preview capture.");
+                ChatGui.PrintError($"Could not capture Fitting Room preview: {ex.Message}", "GlamSpector");
+            }
         }
     }
 
@@ -577,34 +1042,61 @@ public sealed class Plugin : IDalamudPlugin
     {
         string? savedPath = null;
         string? errorMessage = null;
+        var textureAcquired = false;
         try
         {
-            using var texture = await request.TextureTask;
-            var pngBytes = await previewCaptureService.EncodePngAsync(texture);
+            using var texture = await request.TextureTask.WaitAsync(pluginLifetimeToken);
+            textureAcquired = true;
+            var pngBytes = await previewCaptureService.EncodePngAsync(texture, pluginLifetimeToken);
+            pluginLifetimeToken.ThrowIfCancellationRequested();
             if (libraryStore is null)
                 throw new InvalidOperationException("The GlamSpector Library is unavailable.");
 
-            savedPath = libraryStore.AddPersonalPreview(entryId, pngBytes);
+            lock (captureLifecycleSync)
+            {
+                pluginLifetimeToken.ThrowIfCancellationRequested();
+                if (disposed)
+                    throw new OperationCanceledException(pluginLifetimeToken);
+                savedPath = libraryStore.AddPersonalPreview(entryId, pngBytes);
+            }
+        }
+        catch (OperationCanceledException) when (pluginLifetimeToken.IsCancellationRequested)
+        {
         }
         catch (Exception ex)
         {
-            Log.Error(ex, "Could not save Fitting Room personal preview.");
-            errorMessage = ex.Message;
+            if (IsPluginLifetimeValid())
+            {
+                Log.Error(ex, "Could not save Fitting Room personal preview.");
+                errorMessage = ex.Message;
+            }
         }
         finally
         {
-            _ = Framework.Run(() =>
+            var releaseLifetimeHere = textureAcquired;
+            if (!textureAcquired)
+                _ = ObserveLateCaptureTextureAsync(request.TextureTask);
+
+            try
             {
-                personalPreviewCaptureInProgress = false;
-                if (savedPath is not null)
+                QueueLifetimeFrameworkCallback(() =>
                 {
-                    libraryUi?.NotifyLibraryChanged(entryId);
-                    if (Configuration.NotifyCaptureSuccess)
-                        ChatGui.Print($"Saved personal preview → {savedPath}", "GlamSpector");
-                }
-                if (errorMessage is not null)
-                    ChatGui.PrintError($"Personal preview capture failed: {errorMessage}", "GlamSpector");
-            });
+                    personalPreviewCaptureInProgress = false;
+                    if (savedPath is not null)
+                    {
+                        libraryUi?.NotifyLibraryChanged(entryId);
+                        if (Configuration.NotifyCaptureSuccess)
+                            ChatGui.Print($"Saved personal preview → {savedPath}", "GlamSpector");
+                    }
+                    if (errorMessage is not null)
+                        ChatGui.PrintError($"Personal preview capture failed: {errorMessage}", "GlamSpector");
+                });
+            }
+            finally
+            {
+                if (releaseLifetimeHere)
+                    ReleasePluginLifetimeOperation();
+            }
         }
     }
 
@@ -895,31 +1387,142 @@ public sealed class Plugin : IDalamudPlugin
         agent->SaveDeleteOutfit = true;
     }
 
-    private void StartCaptureNow()
+    private void StartCaptureNow(long generation, uint expectedEntityId)
     {
+        InspectCaptureAttempt? attempt = null;
+        CancellationTokenSource? unownedCancellation = null;
+        var lifetimeOperationHeld = false;
         try
         {
-            var snapshot = inspectReader.ReadCurrentInspect();
-            var captureRequest = previewCaptureService.BeginCapture(Configuration.CropPaddingPixels);
-            snapshot.Preview = captureRequest.Diagnostics;
+            if (!IsCurrentGeneration(generation))
+                return;
 
-            captureInProgress = true;
-            _ = FinishCaptureAsync(snapshot, captureRequest);
+            if (expectedEntityId == 0)
+                expectedEntityId = inspectReader.GetCurrentInspectEntityId();
+
+            var currentEntityId = inspectReader.GetCurrentInspectEntityId();
+            if (currentEntityId != expectedEntityId)
+            {
+                throw new InvalidOperationException(
+                    "The inspected character changed before capture started. Start a fresh capture.");
+            }
+
+            var snapshot = inspectReader.ReadCurrentInspect(expectedEntityId);
+            if (inspectReader.GetCurrentInspectEntityId() != expectedEntityId)
+            {
+                throw new InvalidOperationException(
+                    "The inspected character changed before its preview was requested. Start a fresh capture.");
+            }
+
+            unownedCancellation = new CancellationTokenSource();
+            attempt = new InspectCaptureAttempt
+            {
+                Generation = generation,
+                EntityId = expectedEntityId,
+                StartedAtUtc = DateTime.UtcNow,
+                Cancellation = unownedCancellation,
+                Token = unownedCancellation.Token,
+            };
+
+            lock (captureLifecycleSync)
+            {
+                if (disposed || latestInspectCaptureGeneration != generation || activeInspectCapture is not null)
+                    throw new OperationCanceledException("This Inspect capture attempt is no longer active.");
+
+                activeInspectCapture = attempt;
+                captureRequested = false;
+                // Publish busy last after the owning generation and CTS exist.
+                captureInProgress = true;
+            }
+            unownedCancellation = null;
+
+            lock (captureLifecycleSync)
+            {
+                if (disposed ||
+                    latestInspectCaptureGeneration != generation ||
+                    !ReferenceEquals(activeInspectCapture, attempt))
+                {
+                    throw new OperationCanceledException("This Inspect capture attempt is no longer active.");
+                }
+
+                AcquirePluginLifetimeOperation();
+                lifetimeOperationHeld = true;
+                var captureRequest = previewCaptureService.BeginCapture(
+                    Configuration.CropPaddingPixels,
+                    attempt.Token);
+                snapshot.Preview = captureRequest.Diagnostics;
+
+                _ = CancelInspectCaptureAtDeadlineAsync(attempt);
+                _ = FinishCaptureAsync(snapshot, captureRequest, attempt);
+                lifetimeOperationHeld = false;
+                attempt = null;
+            }
         }
         catch (Exception ex)
         {
-            RestorePreviousFocusedAddon();
-            Log.Error(ex, "Could not start GlamSpector capture.");
-            ChatGui.PrintError(ex.Message, "GlamSpector");
+            if (lifetimeOperationHeld)
+                ReleasePluginLifetimeOperation();
+            unownedCancellation?.Dispose();
+            FocusRestoreState focusRestore;
+            if (attempt is not null)
+            {
+                MarkInspectProviderTaskSettled(attempt);
+                focusRestore = CompleteInspectCaptureAttempt(attempt);
+            }
+            else
+            {
+                lock (captureLifecycleSync)
+                    focusRestore = TakeFocusRestoreStateLocked(generation);
+            }
+            QueueFocusRestore(focusRestore);
+            if (IsPluginLifetimeValid())
+            {
+                Log.Error(ex, "Could not start GlamSpector capture.");
+                ChatGui.PrintError(ex.Message, "GlamSpector");
+            }
         }
     }
 
-    private unsafe void RestorePreviousFocusedAddon()
+    private async Task CancelInspectCaptureAtDeadlineAsync(InspectCaptureAttempt attempt)
     {
-        var previousId = previousFocusedAddonIdAfterCapture;
-        var inspectId = inspectAddonIdDuringCapture;
-        previousFocusedAddonIdAfterCapture = 0;
-        inspectAddonIdDuringCapture = 0;
+        await Task.Delay(TimeSpan.FromSeconds(InspectViewportCaptureTimeoutSeconds));
+
+        CancelInspectCaptureAttempt(
+            attempt,
+            $"Capture timed out after {InspectViewportCaptureTimeoutSeconds:0} seconds waiting for the Inspect preview.",
+            onlyWhileTexturePending: true);
+    }
+
+    private FocusRestoreState TakeFocusRestoreStateLocked(long generation)
+    {
+        if (focusOwnerGeneration != generation)
+            return default;
+
+        var state = new FocusRestoreState(generation, focusedPreviousAddonId, focusedInspectAddonId);
+        focusOwnerGeneration = 0;
+        focusedPreviousAddonId = 0;
+        focusedInspectAddonId = 0;
+        return state;
+    }
+
+    private void QueueFocusRestore(FocusRestoreState state)
+    {
+        if (state.Generation == 0 || state.PreviousId == 0 || state.InspectId == 0)
+            return;
+
+        QueueLifetimeFrameworkCallback(
+            () =>
+            {
+                // This callback executes on the game framework thread. No newer
+                // preparation can interleave between the helper's ownership
+                // check and the native focus operation below.
+                RestorePreviousFocusedAddon(state.PreviousId, state.InspectId);
+            },
+            state.Generation);
+    }
+
+    private static unsafe void RestorePreviousFocusedAddon(ushort previousId, ushort inspectId)
+    {
 
         if (previousId == 0 || inspectId == 0)
             return;
@@ -939,29 +1542,72 @@ public sealed class Plugin : IDalamudPlugin
             previous->Focus();
     }
 
-    private async Task FinishCaptureAsync(GlamourSnapshot snapshot, CaptureRequest captureRequest)
+    private void EnsureInspectCaptureCanCommit(InspectCaptureAttempt attempt)
+    {
+        attempt.Token.ThrowIfCancellationRequested();
+        pluginLifetimeToken.ThrowIfCancellationRequested();
+        lock (captureLifecycleSync)
+        {
+            if (disposed ||
+                !ReferenceEquals(activeInspectCapture, attempt) ||
+                latestInspectCaptureGeneration != attempt.Generation)
+            {
+                throw new OperationCanceledException("This Inspect capture attempt no longer owns the active lifecycle.");
+            }
+        }
+    }
+
+    private async Task FinishCaptureAsync(
+        GlamourSnapshot snapshot,
+        CaptureRequest captureRequest,
+        InspectCaptureAttempt attempt)
     {
         string? successMessage = null;
         string? errorMessage = null;
         string? libraryWarning = null;
         long? libraryEntryId = null;
+        var textureAcquired = false;
 
         try
         {
-            Directory.CreateDirectory(Configuration.OutputDirectory);
-
             var safeCharacter = MakeSafeFilePart(snapshot.CharacterName);
             var safeWorld = MakeSafeFilePart(snapshot.HomeWorld);
             var stamp = DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss");
             var baseName = $"{safeCharacter}_{safeWorld}_{stamp}";
 
-            // M3.12 keeps newly indexed captures together in one per-entry media
-            // directory. Existing flat captures remain fully supported. When
-            // automatic Library indexing is disabled, preserve the old flat output
-            // behaviour because there is no Library entry to own the directory.
-            var captureDirectory = Configuration.AutoAddToLibrary && libraryStore is not null
-                ? libraryStore.CreateCaptureMediaDirectory(baseName)
-                : Configuration.OutputDirectory;
+            using var texture = await captureRequest.TextureTask.WaitAsync(attempt.Token);
+            textureAcquired = true;
+            lock (captureLifecycleSync)
+            {
+                attempt.TexturePending = false;
+                attempt.ProviderTaskSettled = true;
+            }
+
+            EnsureInspectCaptureCanCommit(attempt);
+            var previewBytes = await previewCaptureService.EncodePngAsync(texture, pluginLifetimeToken);
+            EnsureInspectCaptureCanCommit(attempt);
+
+            var cardBytes = await glamCardRenderer.RenderAsync(
+                snapshot,
+                previewBytes,
+                Configuration.CleanupItemLevelOverlay);
+            EnsureInspectCaptureCanCommit(attempt);
+
+            string captureDirectory;
+            lock (captureLifecycleSync)
+            {
+                EnsureInspectCaptureCanCommit(attempt);
+                Directory.CreateDirectory(Configuration.OutputDirectory);
+
+                // M3.12 keeps newly indexed captures together in one per-entry
+                // media directory. Starting this side effect while holding the
+                // lifetime gate means Dispose cannot begin between validation
+                // and creation.
+                captureDirectory = Configuration.AutoAddToLibrary && libraryStore is not null
+                    ? libraryStore.CreateCaptureMediaDirectory(baseName)
+                    : Configuration.OutputDirectory;
+            }
+
             var cardPath = Configuration.AutoAddToLibrary && libraryStore is not null
                 ? Path.Combine(captureDirectory, "glam-card.png")
                 : Path.Combine(captureDirectory, baseName + ".png");
@@ -972,29 +1618,42 @@ public sealed class Plugin : IDalamudPlugin
                 ? Path.Combine(captureDirectory, "diagnostic.json")
                 : Path.Combine(captureDirectory, baseName + ".json");
 
-            using var texture = await captureRequest.TextureTask;
-            var previewBytes = await previewCaptureService.EncodePngAsync(texture);
-
             // M3.14 makes the character preview the Library-first visual.
             // Managed Library captures therefore always keep this image even when
             // the old optional SaveRawPreview setting is disabled. Outside the
             // Library we preserve the existing opt-in raw-preview behaviour.
             var keepPreviewImage = (Configuration.AutoAddToLibrary && libraryStore is not null) || Configuration.SaveRawPreview;
             if (keepPreviewImage)
-                await File.WriteAllBytesAsync(rawPath, previewBytes);
+            {
+                Task writePreviewTask;
+                lock (captureLifecycleSync)
+                {
+                    EnsureInspectCaptureCanCommit(attempt);
+                    writePreviewTask = File.WriteAllBytesAsync(rawPath, previewBytes, pluginLifetimeToken);
+                }
+                await writePreviewTask;
+            }
 
-            var cardBytes = await glamCardRenderer.RenderAsync(
-                snapshot,
-                previewBytes,
-                Configuration.CleanupItemLevelOverlay);
-
-            await File.WriteAllBytesAsync(cardPath, cardBytes);
+            Task writeCardTask;
+            lock (captureLifecycleSync)
+            {
+                EnsureInspectCaptureCanCommit(attempt);
+                writeCardTask = File.WriteAllBytesAsync(cardPath, cardBytes, pluginLifetimeToken);
+            }
+            await writeCardTask;
 
             if (Configuration.CopyToClipboard)
             {
-                await previewCaptureService.CopyPngBytesToClipboardAsync(
-                    cardBytes,
-                    Path.GetFileNameWithoutExtension(cardPath));
+                Task copyTask;
+                lock (captureLifecycleSync)
+                {
+                    EnsureInspectCaptureCanCommit(attempt);
+                    copyTask = previewCaptureService.CopyPngBytesToClipboardAsync(
+                        cardBytes,
+                        Path.GetFileNameWithoutExtension(cardPath),
+                        pluginLifetimeToken);
+                }
+                await copyTask;
             }
 
             if (Configuration.WriteDiagnosticJson)
@@ -1003,51 +1662,118 @@ public sealed class Plugin : IDalamudPlugin
                 {
                     WriteIndented = true,
                 });
-                await File.WriteAllTextAsync(jsonPath, json);
+                Task writeJsonTask;
+                lock (captureLifecycleSync)
+                {
+                    EnsureInspectCaptureCanCommit(attempt);
+                    writeJsonTask = File.WriteAllTextAsync(jsonPath, json, pluginLifetimeToken);
+                }
+                await writeJsonTask;
             }
 
             if (Configuration.AutoAddToLibrary && libraryStore is not null)
             {
                 try
                 {
-                    libraryEntryId = libraryStore.AddCapture(
-                        snapshot,
-                        cardPath,
-                        keepPreviewImage ? rawPath : null,
-                        Configuration.WriteDiagnosticJson ? jsonPath : null);
+                    lock (captureLifecycleSync)
+                    {
+                        EnsureInspectCaptureCanCommit(attempt);
+                        libraryEntryId = libraryStore.AddCapture(
+                            snapshot,
+                            cardPath,
+                            keepPreviewImage ? rawPath : null,
+                            Configuration.WriteDiagnosticJson ? jsonPath : null);
+                    }
                 }
                 catch (Exception ex)
                 {
-                    Log.Error(ex, "Glam Card was saved, but could not be added to the library.");
-                    libraryWarning = $"Card saved, but library indexing failed: {ex.Message}";
+                    if (IsPluginLifetimeValid())
+                    {
+                        Log.Error(ex, "Glam Card was saved, but could not be added to the library.");
+                        libraryWarning = $"Card saved, but library indexing failed: {ex.Message}";
+                    }
                 }
             }
 
             successMessage = $"Captured Glam Card for {snapshot.CharacterName} @ {snapshot.HomeWorld} → {cardPath}";
         }
+        catch (OperationCanceledException) when (
+            attempt.Token.IsCancellationRequested ||
+            pluginLifetimeToken.IsCancellationRequested ||
+            !IsCurrentGeneration(attempt.Generation))
+        {
+            if (IsPluginLifetimeValid())
+            {
+                lock (captureLifecycleSync)
+                    errorMessage = attempt.CancellationReason;
+                errorMessage ??= $"Capture timed out after {InspectViewportCaptureTimeoutSeconds:0} seconds waiting for the Inspect preview.";
+                Log.Warning($"GlamSpector Inspect capture cancelled: {errorMessage}");
+            }
+        }
         catch (Exception ex)
         {
-            Log.Error(ex, "GlamSpector capture failed.");
-            errorMessage = $"Capture failed: {ex.Message}";
+            if (IsPluginLifetimeValid())
+            {
+                Log.Error(ex, "GlamSpector capture failed.");
+                errorMessage = $"Capture failed: {ex.Message}";
+            }
         }
         finally
         {
-            _ = Framework.Run(() =>
+            var releaseLifetimeHere = textureAcquired;
+            if (!textureAcquired)
             {
-                captureInProgress = false;
-                RestorePreviousFocusedAddon();
-                if (libraryEntryId.HasValue)
+                _ = ObserveLateCaptureTextureAsync(captureRequest.TextureTask, attempt);
+            }
+
+            var focusRestore = CompleteInspectCaptureAttempt(attempt);
+            try
+            {
+                QueueLifetimeFrameworkCallback(() =>
                 {
-                    libraryUi?.NotifyLibraryChanged(libraryEntryId.Value);
-                    QueueAdventurerPlateCaptureIfConfigured(libraryEntryId.Value, snapshot);
-                }
-                if (successMessage is not null && Configuration.NotifyCaptureSuccess)
-                    ChatGui.Print(successMessage, "GlamSpector");
-                if (libraryWarning is not null)
-                    ChatGui.PrintError(libraryWarning, "GlamSpector");
-                if (errorMessage is not null)
-                    ChatGui.PrintError(errorMessage, "GlamSpector");
-            });
+                    RestorePreviousFocusedAddon(focusRestore.PreviousId, focusRestore.InspectId);
+                    if (libraryEntryId.HasValue)
+                    {
+                        libraryUi?.NotifyLibraryChanged(libraryEntryId.Value);
+                        QueueAdventurerPlateCaptureIfConfigured(
+                            libraryEntryId.Value,
+                            snapshot,
+                            attempt.Generation);
+                    }
+                    if (successMessage is not null && Configuration.NotifyCaptureSuccess)
+                        ChatGui.Print(successMessage, "GlamSpector");
+                    if (libraryWarning is not null)
+                        ChatGui.PrintError(libraryWarning, "GlamSpector");
+                    if (errorMessage is not null)
+                        ChatGui.PrintError(errorMessage, "GlamSpector");
+                }, attempt.Generation);
+            }
+            finally
+            {
+                if (releaseLifetimeHere)
+                    ReleasePluginLifetimeOperation();
+            }
+        }
+    }
+
+    private async Task ObserveLateCaptureTextureAsync(
+        Task<Dalamud.Interface.Textures.TextureWraps.IDalamudTextureWrap> textureTask,
+        InspectCaptureAttempt? inspectAttempt = null)
+    {
+        try
+        {
+            using var texture = await textureTask;
+        }
+        catch
+        {
+            // The abandoned provider request was cancelled or failed and has no
+            // texture to release.
+        }
+        finally
+        {
+            if (inspectAttempt is not null)
+                MarkInspectProviderTaskSettled(inspectAttempt);
+            ReleasePluginLifetimeOperation();
         }
     }
 
@@ -1078,7 +1804,10 @@ public sealed class Plugin : IDalamudPlugin
         }
     }
 
-    private void QueueAdventurerPlateCaptureIfConfigured(long entryId, GlamourSnapshot snapshot)
+    private void QueueAdventurerPlateCaptureIfConfigured(
+        long entryId,
+        GlamourSnapshot snapshot,
+        long originatingInspectGeneration)
     {
         if (libraryStore is null || !Configuration.AutoAddToLibrary)
             return;
@@ -1091,13 +1820,19 @@ public sealed class Plugin : IDalamudPlugin
                 plateCapturePrompt = new PlateCapturePrompt
                 {
                     EntryId = entryId,
+                    OriginatingInspectGeneration = originatingInspectGeneration,
                     EntityId = snapshot.EntityId,
                     CharacterName = snapshot.CharacterName,
                     HomeWorld = snapshot.HomeWorld,
                 };
                 return;
             case AdventurerPlateCaptureMode.Automatic:
-                StartAutomaticAdventurerPlateCapture(entryId, snapshot.EntityId, snapshot.CharacterName, snapshot.HomeWorld);
+                StartAutomaticAdventurerPlateCapture(
+                    entryId,
+                    originatingInspectGeneration,
+                    snapshot.EntityId,
+                    snapshot.CharacterName,
+                    snapshot.HomeWorld);
                 return;
         }
     }
@@ -1125,7 +1860,12 @@ public sealed class Plugin : IDalamudPlugin
             if (ImGui.Button("Capture Plate", new Vector2(150f, 0f)))
             {
                 plateCapturePrompt = null;
-                StartAutomaticAdventurerPlateCapture(prompt.EntryId, prompt.EntityId, prompt.CharacterName, prompt.HomeWorld);
+                StartAutomaticAdventurerPlateCapture(
+                    prompt.EntryId,
+                    prompt.OriginatingInspectGeneration,
+                    prompt.EntityId,
+                    prompt.CharacterName,
+                    prompt.HomeWorld);
             }
             ImGui.SameLine();
             if (ImGui.Button("Skip", new Vector2(100f, 0f)))
@@ -1137,59 +1877,109 @@ public sealed class Plugin : IDalamudPlugin
             plateCapturePrompt = null;
     }
 
-    private unsafe void StartAutomaticAdventurerPlateCapture(long entryId, uint entityId, string characterName, string homeWorld)
+    private unsafe void StartAutomaticAdventurerPlateCapture(
+        long entryId,
+        long originatingInspectGeneration,
+        uint entityId,
+        string characterName,
+        string homeWorld)
     {
-        try
+        lock (captureLifecycleSync)
         {
-            if (libraryStore is null)
-                throw new InvalidOperationException("The GlamSpector library is unavailable.");
-
-            if (autoPlateCapture is not null)
+            if (disposed || pluginLifetimeToken.IsCancellationRequested)
                 return;
 
-            var gameObject = ObjectTable.SearchByEntityId(entityId);
-            if (gameObject is null || !gameObject.IsValid() || gameObject.Address == 0)
-                throw new InvalidOperationException("The inspected character is no longer nearby, so their Adventurer Plate could not be requested.");
-
-            var module = AgentModule.Instance();
-            if (module == null)
-                throw new InvalidOperationException("The game UI agent module is unavailable.");
-
-            var agent = (AgentCharaCard*)module->GetAgentByInternalId(AgentId.CharaCard);
-            if (agent == null)
-                throw new InvalidOperationException("The Adventurer Plate agent is unavailable.");
-
-            var existingAddon = GameGui.GetAddonByName("CharaCard");
-            var wasAlreadyOpen = !existingAddon.IsNull && existingAddon.IsVisible;
-
-            agent->OpenCharaCard((GameObject*)gameObject.Address);
-            autoPlateCapture = new AutoPlateCaptureState
+            try
             {
-                EntryId = entryId,
-                EntityId = entityId,
-                CharacterName = characterName,
-                HomeWorld = homeWorld,
-                StartedAtUtc = DateTime.UtcNow,
-                OpenedByGlamSpector = !wasAlreadyOpen,
-                ReadySinceUtc = null,
-            };
-        }
-        catch (Exception ex)
-        {
-            Log.Warning(ex, "Automatic Adventurer Plate request could not be started.");
-            if (Configuration.NotifyAdventurerPlate)
-                ChatGui.PrintError($"Glam Card saved, but Adventurer Plate was unavailable: {ex.Message}", "GlamSpector");
+                if (libraryStore is null)
+                    throw new InvalidOperationException("The GlamSpector library is unavailable.");
+
+                if (autoPlateCapture is not null)
+                    return;
+
+                var gameObject = ObjectTable.SearchByEntityId(entityId);
+                if (gameObject is null || !gameObject.IsValid() || gameObject.Address == 0)
+                {
+                    Log.Debug(
+                        $"Automatic Adventurer Plate skipped: Inspect gen={originatingInspectGeneration}, " +
+                        $"entity=0x{entityId:X8} ({characterName}) is no longer nearby.");
+                    return;
+                }
+
+                var module = AgentModule.Instance();
+                if (module == null)
+                    throw new InvalidOperationException("The game UI agent module is unavailable.");
+
+                var agent = (AgentCharaCard*)module->GetAgentByInternalId(AgentId.CharaCard);
+                if (agent == null)
+                    throw new InvalidOperationException("The Adventurer Plate agent is unavailable.");
+
+                var existingAddon = GameGui.GetAddonByName("CharaCard");
+                var wasAlreadyOpen = !existingAddon.IsNull && existingAddon.IsVisible;
+
+                agent->OpenCharaCard((GameObject*)gameObject.Address);
+                autoPlateCapture = new AutoPlateCaptureState
+                {
+                    EntryId = entryId,
+                    OriginatingInspectGeneration = originatingInspectGeneration,
+                    EntityId = entityId,
+                    CharacterName = characterName,
+                    HomeWorld = homeWorld,
+                    StartedAtUtc = DateTime.UtcNow,
+                    OpenedByGlamSpector = !wasAlreadyOpen,
+                    ReadySinceUtc = null,
+                };
+            }
+            catch (Exception ex)
+            {
+                Log.Warning(ex, "Automatic Adventurer Plate request could not be started.");
+                if (Configuration.NotifyAdventurerPlate)
+                    ChatGui.PrintError($"Glam Card saved, but Adventurer Plate was unavailable: {ex.Message}", "GlamSpector");
+            }
         }
     }
 
     private unsafe void UpdateAutomaticAdventurerPlateCapture()
     {
+        lock (captureLifecycleSync)
+        {
+            if (!disposed)
+                UpdateAutomaticAdventurerPlateCaptureLocked();
+        }
+    }
+
+    private unsafe void UpdateAutomaticAdventurerPlateCaptureLocked()
+    {
         if (autoPlateCapture is not { } state)
             return;
+        if (!IsPluginLifetimeValid())
+        {
+            autoPlateCapture = null;
+            return;
+        }
 
+        if (inspectReader.TryGetCurrentInspectEntityId(out var currentInspectEntityId) &&
+            currentInspectEntityId != state.EntityId)
+        {
+            AbandonActiveAutomaticPlateCapture(
+                state,
+                $"Inspect moved to entity=0x{currentInspectEntityId:X8} while this attempt still owned entity=0x{state.EntityId:X8}.");
+            return;
+        }
+
+        var lifetimeOperationHeld = false;
         var now = DateTime.UtcNow;
-        var timeout = Math.Clamp(Configuration.AdventurerPlateTimeoutSeconds, 1f, 10f);
-        if (state.ReadySinceUtc is null && (now - state.StartedAtUtc).TotalSeconds > timeout)
+        var elapsedSeconds = (now - state.StartedAtUtc).TotalSeconds;
+        var loadTimeoutSeconds = Math.Clamp(Configuration.AdventurerPlateTimeoutSeconds, 1f, 10f);
+        var settleSeconds = Math.Clamp(Configuration.AdventurerPlateSettleSeconds, 0.25f, 3f);
+        var overallTimeoutSeconds = loadTimeoutSeconds + settleSeconds + AutomaticPlateDeadlineGraceSeconds;
+        if (elapsedSeconds > overallTimeoutSeconds)
+        {
+            FinishAutomaticPlateFailure(state, "Timed out before the Adventurer Plate capture could complete.");
+            return;
+        }
+
+        if (state.ReadySinceUtc is null && elapsedSeconds > loadTimeoutSeconds)
         {
             FinishAutomaticPlateFailure(state, "Timed out waiting for the Adventurer Plate to load.");
             return;
@@ -1199,25 +1989,67 @@ public sealed class Plugin : IDalamudPlugin
         {
             var addon = GameGui.GetAddonByName("CharaCard");
             if (addon.IsNull || !addon.IsVisible)
+            {
+                if (state.ReadySinceUtc.HasValue)
+                {
+                    AbandonActiveAutomaticPlateCapture(
+                        state,
+                        "the Plate closed while its portrait was settling.");
+                }
                 return;
+            }
 
             var agentPtr = GameGui.FindAgentInterface(addon);
             if (agentPtr.IsNull)
+            {
+                if (state.ReadySinceUtc.HasValue)
+                {
+                    AbandonActiveAutomaticPlateCapture(
+                        state,
+                        "the Plate agent became unavailable while settling.");
+                }
                 return;
+            }
 
             var agent = (AgentCharaCard*)agentPtr.Address;
             if (agent == null || agent->Data == null)
+            {
+                if (state.ReadySinceUtc.HasValue)
+                {
+                    AbandonActiveAutomaticPlateCapture(
+                        state,
+                        "the Plate data became unavailable while settling.");
+                }
                 return;
+            }
 
             var data = agent->Data;
             if (data->EntityId != 0 && data->EntityId != state.EntityId)
+            {
+                AbandonActiveAutomaticPlateCapture(
+                    state,
+                    $"the Plate changed to entity=0x{data->EntityId:X8}.");
                 return;
+            }
 
             var plateName = data->Name.ToString();
             if (string.IsNullOrWhiteSpace(plateName))
+            {
+                if (state.ReadySinceUtc.HasValue)
+                {
+                    AbandonActiveAutomaticPlateCapture(
+                        state,
+                        "the Plate lost its character identity while settling.");
+                }
                 return;
+            }
             if (!string.Equals(plateName, state.CharacterName, StringComparison.OrdinalIgnoreCase))
+            {
+                AbandonActiveAutomaticPlateCapture(
+                    state,
+                    $"the Plate changed to {plateName}.");
                 return;
+            }
 
             if (data->IsNotCreated)
             {
@@ -1227,7 +2059,11 @@ public sealed class Plugin : IDalamudPlugin
 
             if (data->PortraitTexture == null)
             {
-                state.ReadySinceUtc = null;
+                if (state.ReadySinceUtc.HasValue)
+                {
+                    FinishAutomaticPlateFailure(state, "The Adventurer Plate portrait became unavailable while settling.");
+                    return;
+                }
                 return;
             }
 
@@ -1236,7 +2072,6 @@ public sealed class Plugin : IDalamudPlugin
             // for a real-time settle interval instead of assuming a handful of
             // framework frames is enough.
             state.ReadySinceUtc ??= now;
-            var settleSeconds = Math.Clamp(Configuration.AdventurerPlateSettleSeconds, 0.25f, 3f);
             if ((now - state.ReadySinceUtc.Value).TotalSeconds < settleSeconds)
                 return;
 
@@ -1251,30 +2086,152 @@ public sealed class Plugin : IDalamudPlugin
             if (Configuration.CapturePortraitRecipeWithPlate)
                 portraitSettings = CapturePortraitSettings(agent);
 
-            var request = previewCaptureService.BeginAddonCapture("CharaCard", "Adventurer Plate", autoUpdate: true, takeBeforeImGuiRender: true);
-            var closeAfter = Configuration.CloseAutoOpenedAdventurerPlate && state.OpenedByGlamSpector;
-            autoPlateCapture = null;
-            _ = FinishAdventurerPlateCaptureAsync(entry, request, portraitSettings, closeAfter, automatic: true);
+            AcquirePluginLifetimeOperation();
+            lifetimeOperationHeld = true;
+            lock (captureLifecycleSync)
+            {
+                if (disposed ||
+                    pluginLifetimeToken.IsCancellationRequested ||
+                    !ReferenceEquals(autoPlateCapture, state))
+                {
+                    throw new OperationCanceledException("This automatic Adventurer Plate attempt is no longer active.");
+                }
+
+                var request = previewCaptureService.BeginAddonCapture(
+                    "CharaCard",
+                    "Adventurer Plate",
+                    autoUpdate: true,
+                    takeBeforeImGuiRender: true,
+                    cancellationToken: pluginLifetimeToken);
+                var closeAfter = Configuration.CloseAutoOpenedAdventurerPlate && state.OpenedByGlamSpector;
+                autoPlateCapture = null;
+                _ = FinishAdventurerPlateCaptureAsync(
+                    entry,
+                    request,
+                    portraitSettings,
+                    closeAfter,
+                    automatic: true,
+                    automaticOwner: state);
+                lifetimeOperationHeld = false;
+            }
         }
         catch (Exception ex)
         {
+            if (lifetimeOperationHeld)
+                ReleasePluginLifetimeOperation();
+            if (!IsPluginLifetimeValid())
+            {
+                if (ReferenceEquals(autoPlateCapture, state))
+                    autoPlateCapture = null;
+                return;
+            }
             FinishAutomaticPlateFailure(state, ex.Message, ex);
         }
     }
 
-    private void FinishAutomaticPlateFailure(AutoPlateCaptureState state, string message, Exception? exception = null)
+    private double GetAutomaticPlateOverallTimeoutSeconds()
     {
+        var loadTimeoutSeconds = Math.Clamp(Configuration.AdventurerPlateTimeoutSeconds, 1f, 10f);
+        var settleSeconds = Math.Clamp(Configuration.AdventurerPlateSettleSeconds, 0.25f, 3f);
+        return loadTimeoutSeconds + settleSeconds + AutomaticPlateDeadlineGraceSeconds;
+    }
+
+    private void AbandonActiveAutomaticPlateCapture(AutoPlateCaptureState state, string reason)
+    {
+        if (!ReferenceEquals(autoPlateCapture, state))
+            return;
+
+        autoPlateCapture = null;
+        LogAutomaticPlateAbandonment(state, reason);
+
+        if (Configuration.CloseAutoOpenedAdventurerPlate &&
+            state.OpenedByGlamSpector &&
+            IsAutomaticPlateStillOwned(state))
+        {
+            CloseAdventurerPlateAgent();
+        }
+    }
+
+    private void LogAutomaticPlateAbandonment(AutoPlateCaptureState state, string reason)
+    {
+        lock (captureLifecycleSync)
+        {
+            if (disposed || pluginLifetimeToken.IsCancellationRequested)
+                return;
+
+            Log.Debug(
+                $"Automatic Adventurer Plate abandoned: Inspect gen={state.OriginatingInspectGeneration}, " +
+                $"entity=0x{state.EntityId:X8} ({state.CharacterName}); {reason}");
+        }
+    }
+
+    private void FinishAutomaticPlateFailure(
+        AutoPlateCaptureState state,
+        string message,
+        Exception? exception = null,
+        bool closeAutoOpenedPlate = true)
+    {
+        if (!ReferenceEquals(autoPlateCapture, state))
+            return;
+
+        autoPlateCapture = null;
+
         if (exception is not null)
             Log.Warning(exception, "Automatic Adventurer Plate capture failed.");
         else
             Log.Warning($"Automatic Adventurer Plate capture failed: {message}");
 
-        autoPlateCapture = null;
-        if (Configuration.CloseAutoOpenedAdventurerPlate && state.OpenedByGlamSpector)
+        if (closeAutoOpenedPlate &&
+            Configuration.CloseAutoOpenedAdventurerPlate &&
+            state.OpenedByGlamSpector &&
+            IsAutomaticPlateStillOwned(state))
+        {
             CloseAdventurerPlateAgent();
+        }
 
         if (Configuration.NotifyAdventurerPlate)
             ChatGui.PrintError($"Glam Card saved; Adventurer Plate not attached: {message}", "GlamSpector");
+    }
+
+    private unsafe bool IsAutomaticPlateStillOwned(AutoPlateCaptureState state)
+    {
+        var addon = GameGui.GetAddonByName("CharaCard");
+        if (addon.IsNull || !addon.IsVisible)
+            return false;
+
+        var agentPtr = GameGui.FindAgentInterface(addon);
+        if (agentPtr.IsNull)
+            return false;
+
+        var agent = (AgentCharaCard*)agentPtr.Address;
+        if (agent == null || agent->Data == null)
+            return false;
+
+        var data = agent->Data;
+        var name = data->Name.ToString();
+        return data->EntityId != 0 &&
+               data->EntityId == state.EntityId &&
+               !string.IsNullOrWhiteSpace(name) &&
+               string.Equals(name, state.CharacterName, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private Task<bool> IsAutomaticPlateStillOwnedOnFrameworkAsync(AutoPlateCaptureState state)
+    {
+        lock (captureLifecycleSync)
+        {
+            if (disposed || pluginLifetimeToken.IsCancellationRequested)
+                return Task.FromResult(false);
+
+            return Framework.Run(() =>
+            {
+                lock (captureLifecycleSync)
+                {
+                    return !disposed &&
+                           !pluginLifetimeToken.IsCancellationRequested &&
+                           IsAutomaticPlateStillOwned(state);
+                }
+            });
+        }
     }
 
     private static unsafe void CloseAdventurerPlateAgent()
@@ -1296,6 +2253,10 @@ public sealed class Plugin : IDalamudPlugin
 
     private unsafe void AttachOpenAdventurerPlate(LibraryEntry entry)
     {
+        if (!IsPluginLifetimeValid())
+            return;
+
+        var lifetimeOperationHeld = false;
         try
         {
             if (libraryStore is null)
@@ -1329,11 +2290,35 @@ public sealed class Plugin : IDalamudPlugin
                 ? CapturePortraitSettings(agent)
                 : null;
 
-            var request = previewCaptureService.BeginAddonCapture("CharaCard", "Adventurer Plate", autoUpdate: true, takeBeforeImGuiRender: true);
-            _ = FinishAdventurerPlateCaptureAsync(entry, request, portraitSettings, closeAfterCapture: false, automatic: false);
+            AcquirePluginLifetimeOperation();
+            lifetimeOperationHeld = true;
+            lock (captureLifecycleSync)
+            {
+                if (disposed || pluginLifetimeToken.IsCancellationRequested)
+                    throw new OperationCanceledException("GlamSpector is unloading.");
+
+                var request = previewCaptureService.BeginAddonCapture(
+                    "CharaCard",
+                    "Adventurer Plate",
+                    autoUpdate: true,
+                    takeBeforeImGuiRender: true,
+                    cancellationToken: pluginLifetimeToken);
+                _ = FinishAdventurerPlateCaptureAsync(
+                    entry,
+                    request,
+                    portraitSettings,
+                    closeAfterCapture: false,
+                    automatic: false,
+                    automaticOwner: null);
+                lifetimeOperationHeld = false;
+            }
         }
         catch (Exception ex)
         {
+            if (lifetimeOperationHeld)
+                ReleasePluginLifetimeOperation();
+            if (!IsPluginLifetimeValid())
+                return;
             Log.Error(ex, "Could not start Adventurer Plate capture.");
             ChatGui.PrintError(ex.Message, "GlamSpector");
         }
@@ -1403,20 +2388,46 @@ public sealed class Plugin : IDalamudPlugin
         };
     }
 
-    private async Task FinishAdventurerPlateCaptureAsync(LibraryEntry entry, CaptureRequest request, PortraitSettingsSnapshot? portraitSettings, bool closeAfterCapture, bool automatic)
+    private async Task FinishAdventurerPlateCaptureAsync(
+        LibraryEntry entry,
+        CaptureRequest request,
+        PortraitSettingsSnapshot? portraitSettings,
+        bool closeAfterCapture,
+        bool automatic,
+        AutoPlateCaptureState? automaticOwner)
     {
+        var textureAcquired = false;
         try
         {
-            using var texture = await request.TextureTask;
+            using var texture = await request.TextureTask.WaitAsync(pluginLifetimeToken);
+            textureAcquired = true;
 
             // Keep the Plate open while an auto-updating viewport texture sees a
             // few more presented frames. The Plate is native FFXIV UI, so we
             // sample the main viewport before Dalamud ImGui is rendered; this
             // keeps the Plate while excluding GlamSpector/other plugin windows.
-            await Task.Delay(250);
-            var bytes = await previewCaptureService.EncodePngAsync(texture);
+            await Task.Delay(250, pluginLifetimeToken);
+            if (automaticOwner is not null &&
+                !await IsAutomaticPlateStillOwnedOnFrameworkAsync(automaticOwner))
+            {
+                LogAutomaticPlateAbandonment(
+                    automaticOwner,
+                    "the Plate closed or changed identity before screenshot encoding.");
+                return;
+            }
+
+            var bytes = await previewCaptureService.EncodePngAsync(texture, pluginLifetimeToken);
+            pluginLifetimeToken.ThrowIfCancellationRequested();
+            if (automaticOwner is not null &&
+                !await IsAutomaticPlateStillOwnedOnFrameworkAsync(automaticOwner))
+            {
+                LogAutomaticPlateAbandonment(
+                    automaticOwner,
+                    "the Plate closed or changed identity during screenshot encoding.");
+                return;
+            }
+
             var folder = Path.GetDirectoryName(entry.CardPath) ?? Configuration.OutputDirectory;
-            Directory.CreateDirectory(folder);
             var fullFolder = Path.GetFullPath(folder).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
             var mediaRoot = libraryStore is null
                 ? string.Empty
@@ -1427,30 +2438,60 @@ public sealed class Plugin : IDalamudPlugin
             var platePath = isManagedMedia
                 ? Path.Combine(folder, "adventurer-plate.png")
                 : Path.Combine(folder, Path.GetFileNameWithoutExtension(entry.CardPath) + "_plate.png");
-            await File.WriteAllBytesAsync(platePath, bytes);
 
-            libraryStore!.SetAdventurerPlatePath(entry.Id, platePath);
-            if (portraitSettings is not null)
-                libraryStore.SetPortraitSettings(entry.Id, portraitSettings);
-            _ = Framework.Run(() =>
+            Task writeTask;
+            lock (captureLifecycleSync)
             {
-                if (closeAfterCapture)
+                pluginLifetimeToken.ThrowIfCancellationRequested();
+                if (disposed)
+                    throw new OperationCanceledException(pluginLifetimeToken);
+                Directory.CreateDirectory(folder);
+                writeTask = File.WriteAllBytesAsync(platePath, bytes, pluginLifetimeToken);
+            }
+            await writeTask;
+
+            lock (captureLifecycleSync)
+            {
+                pluginLifetimeToken.ThrowIfCancellationRequested();
+                if (disposed)
+                    throw new OperationCanceledException(pluginLifetimeToken);
+                libraryStore!.SetAdventurerPlatePath(entry.Id, platePath);
+                if (portraitSettings is not null)
+                    libraryStore.SetPortraitSettings(entry.Id, portraitSettings);
+            }
+
+            QueueLifetimeFrameworkCallback(() =>
+            {
+                if (closeAfterCapture && automaticOwner is not null && IsAutomaticPlateStillOwned(automaticOwner))
                     CloseAdventurerPlateAgent();
                 libraryUi?.NotifyLibraryChanged(entry.Id);
                 if ((automatic && Configuration.NotifyAdventurerPlate) || (!automatic && Configuration.NotifyCaptureSuccess))
                     ChatGui.Print($"Attached Adventurer Plate for {entry.CharacterName} @ {entry.HomeWorld} → {platePath}", "GlamSpector");
             });
         }
+        catch (OperationCanceledException) when (pluginLifetimeToken.IsCancellationRequested)
+        {
+        }
         catch (Exception ex)
         {
+            if (!IsPluginLifetimeValid())
+                return;
+
             Log.Error(ex, "Adventurer Plate capture failed.");
-            _ = Framework.Run(() =>
+            QueueLifetimeFrameworkCallback(() =>
             {
-                if (closeAfterCapture)
+                if (closeAfterCapture && automaticOwner is not null && IsAutomaticPlateStillOwned(automaticOwner))
                     CloseAdventurerPlateAgent();
                 if (!automatic || Configuration.NotifyAdventurerPlate)
                     ChatGui.PrintError($"Adventurer Plate capture failed: {ex.Message}", "GlamSpector");
             });
+        }
+        finally
+        {
+            if (textureAcquired)
+                ReleasePluginLifetimeOperation();
+            else
+                _ = ObserveLateCaptureTextureAsync(request.TextureTask);
         }
     }
 

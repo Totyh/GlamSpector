@@ -8,9 +8,9 @@ This repository is developed iteratively with the user. Product/design decisions
 
 ## Current baseline
 
-- Current milestone at handoff: **M3.15.0**
+- Current milestone at handoff: **M3.15.1**
 - Project SDK: `Dalamud.NET.Sdk/15.0.0`
-- Project version: `0.3.15.0`
+- Project version: `0.3.15.1`
 - Current resolved target in `packages.lock.json`: `net10.0-windows7.0`
 - Important packages include `Microsoft.Data.Sqlite`, `SQLitePCLRaw.bundle_e_sqlite3`, `SixLabors.ImageSharp`, and `SixLabors.ImageSharp.Drawing`.
 

@@ -2,7 +2,7 @@
   "Author": "Private development build",
   "Name": "GlamSpector",
   "Punchline": "Capture inspected glamours and keep a searchable Glamour Library.",
-  "Description": "Milestone 3.15.0 development build. Adds editable local Library titles while preserving captured/imported source identity, keeps Eorzea Collection title/creator/URL attribution separate, remembers useful Library sort/filter/layout/selection and section state, and makes Tags & notes compact by default. Retains the preview-first Library, personal previews, generated Share Cards, Glam Codes, one-at-a-time Eorzea Collection import, Wanted items, ownership progress, item actions, Try On, ratings, duplicate cleanup, Adventurer Plate capture, file-size sorting, and per-entry media folders. /glamspector library | config",
+  "Description": "Milestone 3.15.1 development build. Hardens native Inspect capture lifecycle handling with entity-bound preparation, bounded viewport capture cancellation, non-latching automatic Adventurer Plate deadlines, cache resets when Inspect disappears, and clearer diagnostics. Retains M3.15 editable Library titles and remembered Library UI state plus the preview-first Library, personal previews, generated Share Cards, Glam Codes, one-at-a-time Eorzea Collection import, Wanted items, ownership progress, Try On, ratings, tags/notes, and managed media. /glamspector library | config",
   "ApplicableVersion": "any",
   "Tags": [
     "glamour",

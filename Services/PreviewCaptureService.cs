@@ -31,7 +31,7 @@ public sealed class PreviewCaptureService
         this.readbackProvider = readbackProvider;
     }
 
-    public unsafe CaptureRequest BeginCapture(float paddingPixels)
+    public unsafe CaptureRequest BeginCapture(float paddingPixels, CancellationToken cancellationToken = default)
     {
         var addon = gameGui.GetAddonByName<AddonCharacterInspect>("CharacterInspect");
         if (addon == null)
@@ -108,7 +108,10 @@ public sealed class PreviewCaptureService
             Uv1 = uv1,
         };
 
-        var textureTask = textureProvider.CreateFromImGuiViewportAsync(args, "GlamSpector Inspect Preview");
+        var textureTask = textureProvider.CreateFromImGuiViewportAsync(
+            args,
+            "GlamSpector Inspect Preview",
+            cancellationToken);
 
         var diagnostics = new PreviewCaptureDiagnostics
         {
@@ -127,7 +130,13 @@ public sealed class PreviewCaptureService
     }
 
 
-    public CaptureRequest BeginAddonCapture(string addonName, string debugName, float insetPixels = 0f, bool autoUpdate = false, bool takeBeforeImGuiRender = true)
+    public CaptureRequest BeginAddonCapture(
+        string addonName,
+        string debugName,
+        float insetPixels = 0f,
+        bool autoUpdate = false,
+        bool takeBeforeImGuiRender = true,
+        CancellationToken cancellationToken = default)
     {
         var addon = gameGui.GetAddonByName(addonName);
         if (addon.IsNull || !addon.IsVisible || addon.ScaledSize.X <= 0 || addon.ScaledSize.Y <= 0)
@@ -162,7 +171,10 @@ public sealed class PreviewCaptureService
             Uv1 = uv1,
         };
 
-        var task = textureProvider.CreateFromImGuiViewportAsync(args, $"GlamSpector {debugName}");
+        var task = textureProvider.CreateFromImGuiViewportAsync(
+            args,
+            $"GlamSpector {debugName}",
+            cancellationToken);
         return new CaptureRequest(task, new PreviewCaptureDiagnostics
         {
             BoundsSource = $"Addon:{addonName}",
@@ -178,7 +190,8 @@ public sealed class PreviewCaptureService
         float topRatio,
         float rightRatio,
         float bottomRatio,
-        bool takeBeforeImGuiRender = true)
+        bool takeBeforeImGuiRender = true,
+        CancellationToken cancellationToken = default)
     {
         if (leftRatio < 0f || topRatio < 0f || rightRatio > 1f || bottomRatio > 1f ||
             rightRatio <= leftRatio || bottomRatio <= topRatio)
@@ -217,7 +230,10 @@ public sealed class PreviewCaptureService
             Uv1 = uv1,
         };
 
-        var task = textureProvider.CreateFromImGuiViewportAsync(args, $"GlamSpector {debugName}");
+        var task = textureProvider.CreateFromImGuiViewportAsync(
+            args,
+            $"GlamSpector {debugName}",
+            cancellationToken);
         return new CaptureRequest(task, new PreviewCaptureDiagnostics
         {
             BoundsSource = $"Addon:{addonName}:relative({leftRatio:0.###},{topRatio:0.###},{rightRatio:0.###},{bottomRatio:0.###})",
@@ -231,7 +247,7 @@ public sealed class PreviewCaptureService
     /// Room. The ratios deliberately include the thin native preview frame while
     /// excluding the surrounding equipment-slot buttons, bottom action strip and title bar.
     /// </summary>
-    public CaptureRequest BeginTryOnCharacterCapture() =>
+    public CaptureRequest BeginTryOnCharacterCapture(CancellationToken cancellationToken = default) =>
         BeginRelativeAddonCapture(
             "Tryon",
             "Fitting Room character preview",
@@ -239,7 +255,8 @@ public sealed class PreviewCaptureService
             topRatio: 0.105f,
             rightRatio: 0.795f,
             bottomRatio: 0.879f,
-            takeBeforeImGuiRender: true);
+            takeBeforeImGuiRender: true,
+            cancellationToken: cancellationToken);
 
     public async Task<byte[]> EncodePngAsync(
         IDalamudTextureWrap texture,

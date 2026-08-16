@@ -51,6 +51,58 @@ public sealed class InspectReader
         this.dataManager = dataManager;
     }
 
+    private void ResetObservationCaches()
+    {
+        cachedFacewearEntityId = 0;
+        cachedFacewear = null;
+        cachedFreeCompanyEntityId = 0;
+        cachedFreeCompanyName = null;
+    }
+
+    public unsafe uint GetCurrentInspectEntityId()
+    {
+        var addon = gameGui.GetAddonByName("CharacterInspect");
+        if (addon.IsNull || !addon.IsVisible || !addon.IsReady)
+            throw new InvalidOperationException("The Inspect window is not open and ready.");
+
+        var agentPtr = gameGui.FindAgentInterface(addon);
+        if (agentPtr.IsNull)
+            throw new InvalidOperationException("The Inspect agent is not available.");
+
+        var agent = (AgentInspect*)agentPtr.Address;
+        if (agent == null || agent->CurrentEntityId == 0)
+            throw new InvalidOperationException("No inspected character is currently selected.");
+
+        return agent->CurrentEntityId;
+    }
+
+    public unsafe bool TryGetCurrentInspectEntityId(out uint entityId)
+    {
+        entityId = 0;
+        try
+        {
+            var addon = gameGui.GetAddonByName("CharacterInspect");
+            if (addon.IsNull || !addon.IsVisible || !addon.IsReady)
+                return false;
+
+            var agentPtr = gameGui.FindAgentInterface(addon);
+            if (agentPtr.IsNull)
+                return false;
+
+            var agent = (AgentInspect*)agentPtr.Address;
+            if (agent == null || agent->CurrentEntityId == 0)
+                return false;
+
+            entityId = agent->CurrentEntityId;
+            return true;
+        }
+        catch
+        {
+            entityId = 0;
+            return false;
+        }
+    }
+
     private unsafe (ushort Id0, ushort Id1) ReadGlassesIds(AgentInspect* agent)
     {
         var modelData = &agent->CharaView.ModelData;
@@ -156,16 +208,25 @@ public sealed class InspectReader
         try
         {
             var addon = gameGui.GetAddonByName("CharacterInspect");
-            if (addon.IsNull || !addon.IsVisible)
+            if (addon.IsNull || !addon.IsVisible || !addon.IsReady)
+            {
+                ResetObservationCaches();
                 return;
+            }
 
             var agentPtr = gameGui.FindAgentInterface(addon);
             if (agentPtr.IsNull)
+            {
+                ResetObservationCaches();
                 return;
+            }
 
             var agent = (AgentInspect*)agentPtr.Address;
             if (agent == null || agent->CurrentEntityId == 0)
+            {
+                ResetObservationCaches();
                 return;
+            }
 
             var entityId = agent->CurrentEntityId;
             if (cachedFacewearEntityId != entityId)
@@ -190,14 +251,15 @@ public sealed class InspectReader
         catch
         {
             // Observation is best-effort and must never affect normal UI drawing.
+            ResetObservationCaches();
         }
     }
 
-    public unsafe GlamourSnapshot ReadCurrentInspect()
+    public unsafe GlamourSnapshot ReadCurrentInspect(uint? expectedEntityId = null)
     {
         var addon = gameGui.GetAddonByName("CharacterInspect");
-        if (addon.IsNull)
-            throw new InvalidOperationException("The Inspect window is not open.");
+        if (addon.IsNull || !addon.IsVisible || !addon.IsReady)
+            throw new InvalidOperationException("The Inspect window is not open and ready.");
 
         var agentPtr = gameGui.FindAgentInterface(addon);
         if (agentPtr.IsNull)
@@ -215,6 +277,8 @@ public sealed class InspectReader
         var entityId = agent->CurrentEntityId;
         if (entityId == 0)
             throw new InvalidOperationException("No inspected character is currently selected.");
+        if (expectedEntityId.HasValue && entityId != expectedEntityId.Value)
+            throw new InvalidOperationException("The inspected character changed while capture was being prepared. Start a fresh capture.");
 
         var gameObject = objectTable.SearchByEntityId(entityId);
         var player = gameObject as IPlayerCharacter;
@@ -303,6 +367,12 @@ public sealed class InspectReader
 
         if (pieces.Count == 0)
             throw new InvalidOperationException("The Inspect window is open, but no examined gear was found yet. Wait for the gear list to appear and try again.");
+
+        if (agent->CurrentEntityId != entityId ||
+            (expectedEntityId.HasValue && agent->CurrentEntityId != expectedEntityId.Value))
+        {
+            throw new InvalidOperationException("The inspected character changed while its gear was being read. Start a fresh capture.");
+        }
 
         return new GlamourSnapshot
         {

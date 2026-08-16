@@ -219,6 +219,12 @@ Library entries gained a local, editable display title without replacing capture
 
 Useful navigation state now persists across reloads: sort, filters, filter-bar visibility, left-column width, selected entry when still available, and secondary-section expansion. Search text and transient edit/confirmation/dialog state remain session-only. Tags & notes are collapsed by default to protect the M3.13 visual hierarchy.
 
+### M3.15.1 — Capture lifecycle stability
+
+Native capture state must always have a bounded exit path. Automatic Adventurer Plate capture keeps an overall deadline active through its render-settle phase, and a Plate that closes or changes identity while settling terminates the attempt instead of leaving the plugin globally busy. Inspect preview requests are cancellation-bound, preparation is tied to the inspected entity, and abandoned texture requests are never allowed to complete later against a different target.
+
+CharacterInspect addon readiness is not content identity: the native addon/agent can remain allocated while its inspected entity and Examine data change. Future native capture work should validate the entity across preparation and sampling, clear observation caches when Inspect disappears, and include plugin-owned lifecycle state in diagnostics rather than reporting only addon visibility/readiness.
+
 ## Product/usability lessons so far
 
 1. **Feature hierarchy matters.** New features should be grouped by workflow rather than appended as another equal-priority button.
