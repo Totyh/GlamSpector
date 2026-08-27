@@ -8,9 +8,9 @@ This repository is developed iteratively with the user. Product/design decisions
 
 ## Current baseline
 
-- Current milestone at handoff: **M3.15.6**
+- Current milestone at handoff: **M3.16.0**
 - Project SDK: `Dalamud.NET.Sdk/15.0.0`
-- Project version: `0.3.15.6`
+- Project version: `0.3.16.0`
 - Current resolved target in `packages.lock.json`: `net10.0-windows7.0`
 - Important packages include `Microsoft.Data.Sqlite`, `SQLitePCLRaw.bundle_e_sqlite3`, `SixLabors.ImageSharp`, and `SixLabors.ImageSharp.Drawing`.
 
@@ -72,6 +72,31 @@ GlamSpector checks sources such as:
 A negative lookup is **not proof that an item is missing**, because some storage may be unloaded or unavailable. The UI therefore uses unverified/unknown semantics (`?`) rather than confidently saying "No".
 
 Do not change this into a definitive missing/not-owned claim unless all relevant storage sources can actually be proven.
+
+M3.16 optionally supplements positive evidence through Allagan Tools' public
+Dalamud IPC. Keep that integration optional and IPC-only: do not reference,
+embed, or copy InventoryTools/CriticalCommonLib assemblies or GPL source. A
+zero/error/unavailable result remains unknown. Queries belong in the bounded
+Framework.Update cache, never per ImGui row/frame. The allowlist is limited to
+the active player's personal inventory/equipment/Armoury, Armoire, Glamour
+Dresser, saddlebags, and retainers; exclude FC, housing/shared storage, and
+unrelated characters.
+
+Allagan Tools item add/remove events are the primary cache invalidation path;
+character changes clear the cache and manual ownership refresh revalidates known
+items. The 15-minute TTL is only a missed-event safety net and must remain longer
+than a full large-Library background sweep. Selected-entry item IDs use the
+priority queue; do not raise global IPC throughput to make selection responsive.
+
+All current and future external-plugin integrations follow one policy: each is
+independently configured, explicit opt-in, and disabled by default. Detection or
+installation must never enable it automatically; GlamSpector core behavior must
+not depend on it; disabled integrations may perform only minimal availability/
+status detection and must not retain feature event subscriptions or make data
+queries. Every integration gets its own page/panel under the dedicated Settings
+**Integrations** tab and its own configuration property. Provider absence,
+malformed results, IPC failure, unload, or reload must never prevent GlamSpector
+from loading or remaining usable.
 
 ### Eorzea Collection import
 
@@ -227,8 +252,12 @@ propagate through the generation and lifetime guards.
 ## Repository documentation
 
 Read these before broad work:
-- `README.md` — milestone/change history and user test notes
-- `PROJECT_HISTORY.md` — durable product/design decisions
+- `README.md` — concise public installation, usage, privacy and troubleshooting
+- `CHANGELOG.md` — concise user-facing release history (newest first)
+- `PROJECT_HISTORY.md` — durable detailed engineering/product decisions
 - `ROADMAP.md` — current direction and candidate next work
+
+Normal version bumps add user-facing notes to `CHANGELOG.md`; do not grow the
+README back into a milestone transcript.
 
 If these disagree with current code, report the discrepancy rather than silently choosing one.

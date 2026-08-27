@@ -400,6 +400,25 @@ public sealed class LibraryUi
                $"draw={completedAverageDrawMilliseconds:0.00}ms avg/{completedMaxDrawMilliseconds:0.00}ms max.";
     }
 
+    public string GetSelectedOwnershipDiagnostics()
+    {
+        if (selected is null)
+            return "Selected ownership: none.";
+
+        var items = selected.Pieces
+            .Where(piece => piece.DisplayItemId != 0)
+            .GroupBy(piece => piece.DisplayItemId)
+            .Select(group => group.First())
+            .Take(15)
+            .ToList();
+        if (items.Count == 0)
+            return "Selected ownership: no equipment item IDs.";
+
+        ownershipService.PrioritizeSupplementalChecks(items.Select(piece => piece.DisplayItemId));
+        return "Selected ownership: " + string.Join(" | ", items.Select(piece =>
+            ownershipService.GetItemDiagnostics(piece.DisplayItemId, piece.DisplayItemName)));
+    }
+
     private void RecordDrawPerformance(long startedTimestamp)
     {
         var elapsedMilliseconds = Stopwatch.GetElapsedTime(startedTimestamp).TotalMilliseconds;
@@ -1977,6 +1996,13 @@ public sealed class LibraryUi
             return;
 
         ownershipService.RefreshIfStale();
+        ownershipService.EnsureSupplementalBulkScan(
+            allEntries.SelectMany(entry => entry.Pieces).Select(piece => piece.DisplayItemId));
+        if (selected is not null)
+        {
+            ownershipService.PrioritizeSupplementalChecks(
+                selected.Pieces.Select(piece => piece.DisplayItemId));
+        }
         var progress = new Dictionary<long, OwnershipProgress>();
         var wantedCounts = new Dictionary<long, int>();
         foreach (var entry in allEntries)
@@ -2112,6 +2138,8 @@ public sealed class LibraryUi
             selected = store.Get(id);
             if (selected is not null)
             {
+                ownershipService.PrioritizeSupplementalChecks(
+                    selected.Pieces.Select(piece => piece.DisplayItemId));
                 LoadMetadataEditors(selected, force: true);
                 if (persist && configuration.LibrarySelectedEntryId != selected.Id)
                 {
@@ -2181,6 +2209,8 @@ public sealed class LibraryUi
                 else
                 {
                     selected = restored;
+                    ownershipService.PrioritizeSupplementalChecks(
+                        selected.Pieces.Select(piece => piece.DisplayItemId));
                     if (!presentationByEntry.ContainsKey(selected.Id))
                         presentationByEntry[selected.Id] = BuildEntryPresentation(selected);
                     LoadMetadataEditors(restored, force: true);

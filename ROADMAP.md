@@ -1,6 +1,6 @@
 # ROADMAP.md — GlamSpector
 
-Current baseline: **M3.15.6, portable card-font fallback**
+Current baseline: **M3.16.0, optional Allagan Tools ownership supplementation**
 
 Version labels below are planning candidates and can change after discussion. Do not treat an unimplemented roadmap item as an approved behavior unless the user explicitly requests it.
 
@@ -46,6 +46,21 @@ Completed before M3.15:
 - Image clipboard publication is best-effort and session-capability-aware, so
   an unsupported Dalamud clipboard implementation cannot fail an otherwise
   completed capture (M3.15.6).
+
+## Completed in M3.16
+
+- Optional Allagan Tools public IPC can supplement positive ownership evidence
+  from the active character's personal cached storage.
+- Zero, failed and unavailable IPC results remain unverified; FC, housing/shared
+  storage and unrelated characters are excluded.
+- IPC work is rate-limited and cached outside ImGui drawing, preserving the
+  M3.15.4 large-Library rendering model.
+- README is newcomer-facing and concise; user release history lives in
+  CHANGELOG while PROJECT_HISTORY retains detailed engineering context.
+
+Potential M3.16.1 work, only after a separate product decision: an explicit
+action to send selected Wanted/craftable items to an Allagan Tools craft list.
+Do not add that handoff implicitly or expand recipe trees in M3.16.0.
 
 ## Short-term polish candidates
 

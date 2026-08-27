@@ -8,6 +8,7 @@ using System.Text.Json;
 using Dalamud.Game.Inventory;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Game.UI;
+using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.UI.Misc;
 using FFXIVClientStructs.FFXIV.Client.UI.Agent;
 using GlamSpector.Models;
@@ -30,6 +31,7 @@ public sealed class InventoryOwnershipService
     private readonly IGameInventory inventory;
     private readonly IDataManager dataManager;
     private readonly IPlayerState playerState;
+    private readonly AllaganToolsOwnershipService allaganTools;
     private readonly string persistentCachePath;
     private readonly Dictionary<uint, uint> cabinetRowByItem = [];
     private readonly Dictionary<uint, HashSet<string>> locationsByItem = [];
@@ -95,12 +97,18 @@ public sealed class InventoryOwnershipService
         (GameInventoryType.RetainerMarket, "Retainer market"),
     ];
 
-    public InventoryOwnershipService(IGameInventory inventory, IDataManager dataManager, IPlayerState playerState, string persistentCachePath)
+    public InventoryOwnershipService(
+        IGameInventory inventory,
+        IDataManager dataManager,
+        IPlayerState playerState,
+        string persistentCachePath,
+        AllaganToolsOwnershipService allaganTools)
     {
         this.inventory = inventory;
         this.dataManager = dataManager;
         this.playerState = playerState;
         this.persistentCachePath = persistentCachePath;
+        this.allaganTools = allaganTools;
         LoadPersistentDresserCaches();
 
         // Cabinet.IsItemInCabinet wants a Cabinet-row ID rather than an Item ID.
@@ -145,6 +153,7 @@ public sealed class InventoryOwnershipService
         SaddlebagCached = false;
         ArmoireLoaded = false;
         GlamourDresserOutfitSlotCount = 0;
+        var loadedRetainerName = TryGetLoadedRetainerName();
 
         foreach (var (type, label) in Containers)
         {
@@ -155,7 +164,12 @@ public sealed class InventoryOwnershipService
                 {
                     var itemId = items[i].BaseItemId;
                     if (itemId != 0)
-                        AddLocation(itemId, label);
+                    {
+                        var effectiveLabel = label == "Loaded retainer" && !string.IsNullOrWhiteSpace(loadedRetainerName)
+                            ? $"Retainer: {loadedRetainerName}"
+                            : label;
+                        AddLocation(itemId, effectiveLabel);
+                    }
                 }
             }
             catch
@@ -169,6 +183,25 @@ public sealed class InventoryOwnershipService
         ApplyExpandedGlamourDresserCache();
         RefreshArmoire();
         lastRefreshUtc = DateTime.UtcNow;
+    }
+
+    private static unsafe string? TryGetLoadedRetainerName()
+    {
+        try
+        {
+            // FFXIVClientStructs API 15 exposes the current RetainerManager
+            // active retainer and its generated NameString property. No custom
+            // signature/hook or external-plugin data is involved. The value is
+            // used only for this live ownership refresh and is never persisted.
+            var manager = RetainerManager.Instance();
+            var retainer = manager == null ? null : manager->GetActiveRetainer();
+            var name = retainer == null ? null : retainer->NameString;
+            return string.IsNullOrWhiteSpace(name) ? null : name.Trim();
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private unsafe void RefreshItemFinderCache()
@@ -631,6 +664,29 @@ public sealed class InventoryOwnershipService
 
     public InventoryOwnership Get(uint itemId)
     {
+        var native = GetNative(itemId);
+        if (native.Owned)
+            return native;
+
+        if (allaganTools.TryGetOwned(itemId))
+        {
+            return new InventoryOwnership
+            {
+                Owned = true,
+                Summary = "✓ Allagan Tools",
+                Tooltip = "Owned — Allagan Tools cached personal storage. This supplemental result is read locally through Dalamud IPC; no data is uploaded or shared.",
+            };
+        }
+
+        return native;
+    }
+
+    /// <summary>
+    /// Resolves native GlamSpector evidence independently so its provenance
+    /// always has deterministic precedence over supplemental integrations.
+    /// </summary>
+    public InventoryOwnership GetNative(uint itemId)
+    {
         RefreshIfStale();
         if (itemId != 0 && locationsByItem.TryGetValue(itemId, out var locations) && locations.Count > 0)
         {
@@ -638,7 +694,7 @@ public sealed class InventoryOwnershipService
             {
                 Owned = true,
                 Summary = "✓ " + string.Join(", ", locations.OrderBy(x => x, StringComparer.OrdinalIgnoreCase)),
-                Tooltip = "GlamSpector found this visible glamour item in the listed current-character storage location(s).",
+                Tooltip = "Owned — game inventory/cache. GlamSpector found this visible glamour item in the listed current-character storage location(s).",
             };
         }
 
@@ -648,6 +704,29 @@ public sealed class InventoryOwnershipService
             Summary = "?",
             Tooltip = BuildUnknownTooltip(),
         };
+    }
+
+    public void PrioritizeSupplementalChecks(IEnumerable<uint> itemIds) =>
+        allaganTools.PrioritizeItems(itemIds);
+
+    public void EnsureSupplementalBulkScan(IEnumerable<uint> itemIds)
+    {
+        RefreshIfStale();
+        var nativeUnknown = itemIds
+            .Where(itemId => itemId != 0 && !locationsByItem.ContainsKey(itemId))
+            .Distinct()
+            .ToArray();
+        allaganTools.EnsureBulkScan(nativeUnknown);
+    }
+
+    public string GetItemDiagnostics(uint itemId, string itemName)
+    {
+        var native = GetNative(itemId);
+        var atStatus = allaganTools.GetItemDiagnostics(itemId);
+        var combined = native.Owned
+            ? native.Summary
+            : allaganTools.TryGetOwned(itemId) ? "✓ Allagan Tools" : "?";
+        return $"{itemName} ({itemId}): native={(native.Owned ? native.Summary : "unknown")}; at={atStatus}; combined={combined}";
     }
 
     public unsafe InventoryOwnership GetFacewear(ushort glassesId)
@@ -695,7 +774,10 @@ public sealed class InventoryOwnershipService
                     : "Dresser not cached";
             var armoire = ArmoireLoaded ? "Armoire ✓" : "Armoire not loaded";
             var saddle = SaddlebagCached ? "Saddlebags ✓" : "Saddlebags live-only";
-            return $"Ownership coverage: Inventory/Armoury ✓ · {saddle} · {dresser} · {armoire} · Retainers: currently loaded only";
+            var allagan = allaganTools.Enabled
+                ? allaganTools.Initialized ? "Allagan Tools personal cache ✓" : "Allagan Tools unavailable"
+                : "Allagan Tools disabled";
+            return $"Ownership coverage: Inventory/Armoury ✓ · {saddle} · {dresser} · {armoire} · Retainers: currently loaded only · {allagan}";
         }
     }
 
@@ -715,6 +797,7 @@ public sealed class InventoryOwnershipService
         if (!CanForceRefresh)
             return false;
         Refresh();
+        allaganTools.RequestRefreshKnownItems();
         return true;
     }
 
@@ -735,6 +818,10 @@ public sealed class InventoryOwnershipService
         if (!ArmoireLoaded)
             parts.Add("Armoire data is not currently loaded from the server.");
         parts.Add("Retainers that are not currently loaded are not checked yet.");
+        if (allaganTools.Enabled)
+            parts.Add(allaganTools.Initialized
+                ? "Allagan Tools did not provide positive evidence in its currently cached personal storage; zero still remains unverified."
+                : "Allagan Tools supplementation is enabled but not currently available/initialized.");
         return string.Join("\n", parts);
     }
 }

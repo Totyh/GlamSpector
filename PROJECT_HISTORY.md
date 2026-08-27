@@ -1,6 +1,6 @@
 # PROJECT_HISTORY.md — GlamSpector durable context
 
-This is a **handoff summary**, not a transcript. It records product decisions and lessons that should survive across Codex threads. `README.md` remains the detailed milestone log.
+This is a **handoff summary**, not a transcript. It records product decisions and lessons that should survive across Codex threads. `CHANGELOG.md` is the concise user-facing release history; `README.md` is installation/usage oriented.
 
 ## What GlamSpector is becoming
 
@@ -49,6 +49,21 @@ The ownership implementation grew to use:
 - Facewear unlocks
 
 Expanded Glamour Dresser/Outfit ownership is persisted per character so the user can seed it by opening the Dresser and later retain useful knowledge across reloads.
+
+M3.16 added optional Allagan Tools supplementation through public Dalamud IPC
+only. It is explicit opt-in and contributes positive evidence from the active
+character's personal cached storage. Calls are deduplicated, rate-limited and
+performed on Framework.Update; Library drawing only reads a local cache. FC,
+housing/shared storage and unrelated characters are excluded by a strict
+container allowlist. Allagan Tools zero/unavailable/error results remain unknown.
+The cache relies primarily on item-change events, uses a 15-minute safety TTL so
+multi-thousand-item initial sweeps can finish, and prioritizes the selected
+entry without increasing bounded global IPC throughput.
+
+External integrations now have a durable UX/lifecycle rule: disabled by default,
+independent explicit opt-in, their own Integrations settings page, status-only
+minimal detection while disabled, and no ability to make core GlamSpector load
+or functionality depend on the provider.
 
 ### Native FFXIV operations must respect threading/timing
 
@@ -313,6 +328,18 @@ or failed clipboard work cannot discard staged media, prevent Library
 publication, or turn a completed capture into a capture failure. A confirmed
 unsupported capability is remembered only for the plugin session so later
 captures skip the unavailable operation without repeated exceptions.
+
+### M3.16 — Optional Allagan Tools ownership evidence
+
+Ownership gained an optional local IPC source without changing its conservative
+meaning. Native positives win immediately; an Allagan Tools positive can verify
+an otherwise unknown item; every zero or failure remains `?`. The integration
+has no InventoryTools/CriticalCommonLib assembly dependency and does not alter
+Wanted flags automatically.
+
+The public documentation was split: README now introduces installation and use,
+CHANGELOG holds concise user-facing release notes, and this file keeps detailed
+engineering history.
 
 ## Product/usability lessons so far
 

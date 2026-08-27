@@ -49,6 +49,7 @@ public sealed class Plugin : IDalamudPlugin
     private readonly PreviewCaptureService previewCaptureService;
     private readonly GlamCardRenderer glamCardRenderer;
     private readonly ConfigUi configUi;
+    private readonly AllaganToolsOwnershipService allaganToolsOwnershipService;
     private readonly InventoryOwnershipService inventoryOwnershipService;
     private readonly GlamCodeService glamCodeService;
     private readonly EorzeaCollectionImportService eorzeaCollectionImportService;
@@ -291,6 +292,14 @@ public sealed class Plugin : IDalamudPlugin
             Configuration.Version = 12;
         }
 
+        if (Configuration.Version < 13)
+        {
+            // M3.16 adds optional Allagan Tools ownership supplementation.
+            // Preserve explicit opt-in for existing installations.
+            Configuration.EnableAllaganToolsIntegration = false;
+            Configuration.Version = 13;
+        }
+
         Configuration.Save();
 
         if (string.IsNullOrWhiteSpace(Configuration.OutputDirectory))
@@ -302,12 +311,17 @@ public sealed class Plugin : IDalamudPlugin
         inspectReader = new InspectReader(GameGui, ObjectTable, DataManager);
         previewCaptureService = new PreviewCaptureService(GameGui, TextureProvider, TextureReadbackProvider);
         glamCardRenderer = new GlamCardRenderer();
-        configUi = new ConfigUi(Configuration);
+        allaganToolsOwnershipService = new AllaganToolsOwnershipService(
+            PluginInterface,
+            PlayerStateService,
+            Configuration);
+        configUi = new ConfigUi(Configuration, allaganToolsOwnershipService);
         inventoryOwnershipService = new InventoryOwnershipService(
             GameInventory,
             DataManager,
             PlayerStateService,
-            Path.Combine(PluginInterface.ConfigDirectory.FullName, "glamspector-ownership-cache.json"));
+            Path.Combine(PluginInterface.ConfigDirectory.FullName, "glamspector-ownership-cache.json"),
+            allaganToolsOwnershipService);
         glamCodeService = new GlamCodeService(DataManager);
         var libraryMediaRoot = Path.Combine(Configuration.OutputDirectory, "LibraryMedia");
         eorzeaCollectionImportService = new EorzeaCollectionImportService(
@@ -354,7 +368,7 @@ public sealed class Plugin : IDalamudPlugin
         Framework.Update += OnFrameworkUpdate;
 
         HandleVersionUpdateNotification(hadSavedConfiguration);
-        Log.Information("GlamSpector Milestone 3.15.6 loaded.");
+        Log.Information("GlamSpector Milestone 3.16.0 loaded.");
     }
 
     private void HandleVersionUpdateNotification(bool hadSavedConfiguration)
@@ -471,6 +485,7 @@ public sealed class Plugin : IDalamudPlugin
         PluginInterface.UiBuilder.OpenConfigUi -= configUi.Open;
         PluginInterface.UiBuilder.OpenMainUi -= OpenMainUi;
         Framework.Update -= OnFrameworkUpdate;
+        allaganToolsOwnershipService.Dispose();
         CommandManager.RemoveHandler(CommandName);
     }
 
@@ -510,8 +525,12 @@ public sealed class Plugin : IDalamudPlugin
             case "diag":
                 ChatGui.Print(inspectReader.GetDiagnostics(), "GlamSpector");
                 ChatGui.Print(GetCaptureLifecycleDiagnostics(), "GlamSpector");
+                ChatGui.Print(allaganToolsOwnershipService.GetDiagnostics(), "GlamSpector");
                 if (libraryUi is not null)
+                {
                     ChatGui.Print(libraryUi.GetPerformanceDiagnostics(), "GlamSpector");
+                    ChatGui.Print(libraryUi.GetSelectedOwnershipDiagnostics(), "GlamSpector");
+                }
                 break;
             case "ownership-debug":
             case "owned-debug":
@@ -1044,6 +1063,8 @@ public sealed class Plugin : IDalamudPlugin
 
     private void OnFrameworkUpdate(IFramework framework)
     {
+        allaganToolsOwnershipService.Update();
+
         InspectCapturePreparation? preparation;
         lock (captureLifecycleSync)
             preparation = inspectCapturePreparation;

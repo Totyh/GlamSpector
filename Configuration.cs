@@ -13,7 +13,7 @@ public enum AdventurerPlateCaptureMode
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 12;
+    public int Version { get; set; } = 13;
 
     // Assembly/plugin version last observed by this installation. This is kept
     // separate from the configuration schema Version above.
@@ -28,6 +28,10 @@ public sealed class Configuration : IPluginConfiguration
     public bool AutoAddToLibrary { get; set; } = true;
     public bool BringInspectToFrontBeforeCapture { get; set; } = true;
     public bool HideGlamSpectorWindowsDuringCapture { get; set; } = false;
+
+    // Optional local IPC integration. Existing installations remain opted out
+    // until the user explicitly enables it.
+    public bool EnableAllaganToolsIntegration { get; set; }
 
     // M3.5: after a normal Glam Card capture, optionally fetch the inspected
     // character's Adventurer Plate and attach it to the same library entry.
