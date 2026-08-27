@@ -269,8 +269,12 @@ public sealed class LibraryStore
         GlamourSnapshot snapshot,
         string cardPath,
         string? rawPreviewPath,
-        string? diagnosticJsonPath)
+        string? diagnosticJsonPath,
+        Func<bool>? canCommit = null)
     {
+        if (canCommit is not null && !canCommit())
+            throw new OperationCanceledException("The capture no longer owns Library publication.");
+
         using var connection = OpenConnection();
         using var transaction = connection.BeginTransaction();
 
@@ -390,6 +394,9 @@ public sealed class LibraryStore
             insertPiece.Parameters.AddWithValue("$stain2_name", DbValue(piece.Stain2Name));
             insertPiece.ExecuteNonQuery();
         }
+
+        if (canCommit is not null && !canCommit())
+            throw new OperationCanceledException("The capture was retired before Library commit.");
 
         transaction.Commit();
         return entryId;

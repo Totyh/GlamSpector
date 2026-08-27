@@ -246,6 +246,21 @@ last-seen version. A saved pre-M3.15.2 configuration reliably identifies an
 existing installation for the initial announcement; a genuinely new config is
 bootstrapped silently. Same-version reloads and downgrades do not announce.
 
+### M3.15.3 — Inspect watchdog and stale-worker retirement
+
+The original 10-second Inspect timeout covered only native viewport texture
+acquisition. Post-texture readback, rendering, encoding, file I/O and Library
+publication could therefore hold `captureInProgress` indefinitely. Inspect
+attempts now also have a 30-second whole-operation deadline and monitor valid
+nonzero CharacterInspect identity through every processing stage.
+
+Lifecycle ownership is separate from worker/resource lifetime. Deadline- or
+target-retired workers immediately release the Capture UI and lose all commit
+authority, while retaining their local resources until their own work and the
+texture provider actually settle. Automatic Inspect media is written to
+generation-specific staging files and promoted only while that generation still
+owns publication. Future capture work must preserve this separation.
+
 ## Product/usability lessons so far
 
 1. **Feature hierarchy matters.** New features should be grouped by workflow rather than appended as another equal-priority button.

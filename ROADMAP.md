@@ -1,6 +1,6 @@
 # ROADMAP.md — GlamSpector
 
-Current baseline: **M3.15.2, preview/import/update polish**
+Current baseline: **M3.15.3, Inspect watchdog and stale-worker retirement**
 
 Version labels below are planning candidates and can change after discussion. Do not treat an unimplemented roadmap item as an approved behavior unless the user explicitly requests it.
 
@@ -30,6 +30,10 @@ Completed before M3.15:
   page or image requests; existing cached media remains supported (M3.15.2).
 - Genuine version increases announce once in chat while fresh installs and
   same-version reloads remain quiet (M3.15.2).
+- Inspect capture lifecycle ownership has a true whole-attempt watchdog,
+  all-phase entity monitoring, staged media publication, and exact processing
+  diagnostics; abandoned workers unwind privately without blocking newer
+  captures (M3.15.3).
 
 ## Short-term polish candidates
 

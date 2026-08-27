@@ -27,6 +27,7 @@ public sealed class Plugin : IDalamudPlugin
 {
     private const string CommandName = "/glamspector";
     private const double InspectViewportCaptureTimeoutSeconds = 10.0;
+    private const double InspectCaptureAttemptTimeoutSeconds = 30.0;
     private const double AutomaticPlateDeadlineGraceSeconds = 2.0;
 
     [PluginService] internal static IDalamudPluginInterface PluginInterface { get; private set; } = null!;
@@ -75,6 +76,8 @@ public sealed class Plugin : IDalamudPlugin
     private ushort focusedPreviousAddonId;
     private ushort focusedInspectAddonId;
     private InspectCaptureAttempt? activeInspectCapture;
+    private InspectCaptureAttempt? latestRetiredInspectCapture;
+    private readonly HashSet<InspectCaptureAttempt> inspectCaptureAttemptsAwaitingDisposal = [];
     private TryOnQueueState? tryOnQueue;
     private PendingLibraryItemAction? pendingLibraryItemAction;
     private volatile bool personalPreviewCaptureInProgress;
@@ -117,10 +120,16 @@ public sealed class Plugin : IDalamudPlugin
         public required long Generation { get; init; }
         public required uint EntityId { get; init; }
         public required DateTime StartedAtUtc { get; init; }
+        public required DateTime DeadlineUtc { get; init; }
         public required CancellationTokenSource Cancellation { get; init; }
         public required CancellationToken Token { get; init; }
+        public InspectCaptureStage Stage { get; set; } = InspectCaptureStage.WaitTexture;
+        public DateTime StageStartedAtUtc { get; set; }
         public bool TexturePending { get; set; } = true;
         public bool ProviderTaskSettled { get; set; }
+        public bool WorkerSettled { get; set; }
+        public bool Retired { get; set; }
+        public string? RetirementReason { get; set; }
         public bool CancellationRequested { get; set; }
         public string? CancellationReason { get; set; }
         public int CancellationOperations { get; set; }
@@ -128,7 +137,32 @@ public sealed class Plugin : IDalamudPlugin
         public bool CancellationDisposed { get; set; }
     }
 
+    private enum InspectCaptureStage
+    {
+        WaitTexture,
+        EncodeReadback,
+        PreparePreview,
+        RenderCard,
+        EncodeCard,
+        EncodePortrait,
+        WritePreview,
+        WriteCard,
+        WriteJson,
+        Clipboard,
+        LibraryDatabase,
+        Finalize,
+    }
+
     private readonly record struct FocusRestoreState(long Generation, ushort PreviousId, ushort InspectId);
+
+    private readonly record struct InspectCaptureCompletion(
+        FocusRestoreState FocusRestore,
+        bool CompletedWithAuthority);
+
+    private readonly record struct StagedInspectFile(
+        string TemporaryPath,
+        string FinalPath,
+        bool FinalExistedBefore);
 
     private sealed class TryOnQueueState
     {
@@ -418,6 +452,7 @@ public sealed class Plugin : IDalamudPlugin
             lock (captureLifecycleSync)
             {
                 pluginLifetimeCancellationOperations--;
+                DisposeSettledInspectCaptureCancellationsLocked();
                 disposeLifetimeCancellation = TryTakePluginLifetimeCancellationForDisposalLocked();
             }
             disposeLifetimeCancellation?.Dispose();
@@ -425,8 +460,10 @@ public sealed class Plugin : IDalamudPlugin
 
         if (activeCapture is not null)
         {
-            CancelInspectCaptureAttempt(activeCapture, "GlamSpector is unloading.");
-            _ = CompleteInspectCaptureAttempt(activeCapture);
+            RetireInspectCaptureAttempt(
+                activeCapture,
+                "plugin-dispose",
+                "GlamSpector is unloading.");
         }
 
         PluginInterface.UiBuilder.Draw -= Draw;
@@ -487,7 +524,7 @@ public sealed class Plugin : IDalamudPlugin
     private void Draw()
     {
         inspectReader.ObserveCurrentInspect();
-        CancelPendingInspectTextureIfInvalid();
+        MonitorActiveInspectCaptureIdentity();
 
         // Automatic Plate capture still needs ImGui viewport access, so it is
         // advanced from Draw. Native CharacterInspect focusing is deliberately
@@ -539,32 +576,40 @@ public sealed class Plugin : IDalamudPlugin
             TryStartCapture();
     }
 
-    private void CancelPendingInspectTextureIfInvalid()
+    private void MonitorActiveInspectCaptureIdentity()
     {
         InspectCaptureAttempt? attempt;
         lock (captureLifecycleSync)
         {
             attempt = activeInspectCapture;
-            if (attempt is null || !attempt.TexturePending || attempt.CancellationRequested)
+            if (attempt is null || attempt.Retired)
                 return;
         }
 
-        string? reason = null;
-        try
+        if (inspectReader.TryGetCurrentInspectEntityId(out var currentEntityId))
         {
-            var currentEntityId = inspectReader.GetCurrentInspectEntityId();
             if (currentEntityId != attempt.EntityId)
-                reason = "The inspected character changed before the preview capture completed. Start a fresh capture.";
-        }
-        catch
-        {
-            reason = "The Inspect window closed or became unavailable before the preview capture completed.";
-        }
-
-        if (reason is null)
+            {
+                RetireInspectCaptureAttempt(
+                    attempt,
+                    "target-changed",
+                    $"The inspected character changed from 0x{attempt.EntityId:X8} to 0x{currentEntityId:X8}.");
+            }
             return;
+        }
 
-        CancelInspectCaptureAttempt(attempt, reason, onlyWhileTexturePending: true);
+        // A closed/unready/zero-entity Inspect is conclusive while the viewport
+        // request is still pending. After texture acquisition it may merely be a
+        // transient duty/ObjectTable transition, so the whole-attempt watchdog is
+        // the fallback unless a valid different entity appears.
+        if (attempt.TexturePending)
+        {
+            RetireInspectCaptureAttempt(
+                attempt,
+                "inspect-unavailable",
+                "The Inspect window closed or became unavailable before the preview capture completed.",
+                onlyWhileTexturePending: true);
+        }
     }
 
     private bool IsPluginLifetimeValid() => !pluginLifetimeToken.IsCancellationRequested;
@@ -653,64 +698,96 @@ public sealed class Plugin : IDalamudPlugin
             return !disposed && generation != 0 && latestInspectCaptureGeneration == generation;
     }
 
-    private void CancelInspectCaptureAttempt(
+    private bool RetireInspectCaptureAttempt(
         InspectCaptureAttempt attempt,
+        string retirementReason,
         string reason,
         bool onlyWhileTexturePending = false)
     {
         var cancel = false;
+        FocusRestoreState focusRestore = default;
         lock (captureLifecycleSync)
         {
             if (!ReferenceEquals(activeInspectCapture, attempt) ||
-                attempt.CancellationRequested ||
+                attempt.Retired ||
                 (onlyWhileTexturePending && !attempt.TexturePending))
-                return;
+                return false;
 
+            attempt.Retired = true;
+            attempt.RetirementReason = retirementReason;
             attempt.CancellationRequested = true;
             attempt.CancellationReason = reason;
             attempt.CancellationOperations++;
+            attempt.CleanupRequested = true;
+            activeInspectCapture = null;
+            latestRetiredInspectCapture = attempt;
             captureRequested = false;
+            inspectCapturePreparation = null;
             captureReadyAfterInspectFocus = false;
             captureReadyGeneration = 0;
             captureReadyEntityId = 0;
+            focusRestore = TakeFocusRestoreStateLocked(attempt.Generation);
+
+            // Lifecycle availability is independent from the abandoned worker's
+            // physical completion. Publish idle only after all ownership state is
+            // cleared so a new generation sees a consistent lifecycle.
+            captureInProgress = false;
             cancel = true;
         }
 
         if (!cancel)
-            return;
+            return false;
 
         try
         {
             attempt.Cancellation.Cancel();
         }
+        catch (Exception ex)
+        {
+            if (IsPluginLifetimeValid())
+                Log.Warning(ex, "An Inspect capture cancellation callback failed during retirement.");
+        }
         finally
         {
-            CancellationTokenSource? disposeCancellation = null;
             lock (captureLifecycleSync)
             {
                 attempt.CancellationOperations--;
-                if (attempt.CleanupRequested &&
-                    attempt.ProviderTaskSettled &&
-                    attempt.CancellationOperations == 0 &&
-                    !attempt.CancellationDisposed)
-                {
-                    attempt.CancellationDisposed = true;
-                    disposeCancellation = attempt.Cancellation;
-                }
+                TryDisposeInspectCaptureCancellationLocked(attempt);
             }
-            disposeCancellation?.Dispose();
         }
+
+        // A valid replacement Inspect already represents new user activity; an
+        // old generation must not take focus away from it. Other retirements may
+        // restore only through the existing generation/lifetime-guarded callback.
+        if (retirementReason != "target-changed")
+            QueueFocusRestore(focusRestore);
+        if (IsPluginLifetimeValid())
+        {
+            if (retirementReason is "deadline" or "texture-timeout" or "inspect-unavailable")
+            {
+                Log.Warning($"GlamSpector Inspect capture retired ({retirementReason}): {reason}");
+                QueueLifetimeFrameworkCallback(
+                    () => ChatGui.PrintError(reason, "GlamSpector"),
+                    attempt.Generation);
+            }
+            else
+            {
+                Log.Debug($"GlamSpector Inspect capture retired ({retirementReason}): {reason}");
+            }
+        }
+        return true;
     }
 
-    private FocusRestoreState CompleteInspectCaptureAttempt(InspectCaptureAttempt attempt)
+    private InspectCaptureCompletion CompleteInspectCaptureAttempt(InspectCaptureAttempt attempt)
     {
-        CancellationTokenSource? disposeCancellation = null;
         FocusRestoreState focusRestore = default;
+        var completedWithAuthority = false;
 
         lock (captureLifecycleSync)
         {
             if (ReferenceEquals(activeInspectCapture, attempt))
             {
+                completedWithAuthority = InspectCaptureHasAuthorityLocked(attempt);
                 activeInspectCapture = null;
                 captureRequested = false;
                 inspectCapturePreparation = null;
@@ -724,41 +801,52 @@ public sealed class Plugin : IDalamudPlugin
                 captureInProgress = false;
             }
 
+            attempt.WorkerSettled = true;
             attempt.CleanupRequested = true;
-            if (attempt.ProviderTaskSettled &&
-                attempt.CancellationOperations == 0 &&
-                !attempt.CancellationDisposed)
-            {
-                attempt.CancellationDisposed = true;
-                disposeCancellation = attempt.Cancellation;
-            }
+            TryDisposeInspectCaptureCancellationLocked(attempt);
         }
 
-        disposeCancellation?.Dispose();
-        return focusRestore;
+        return new InspectCaptureCompletion(focusRestore, completedWithAuthority);
     }
 
     private void MarkInspectProviderTaskSettled(InspectCaptureAttempt attempt)
     {
-        CancellationTokenSource? disposeCancellation = null;
         lock (captureLifecycleSync)
         {
             attempt.TexturePending = false;
             attempt.ProviderTaskSettled = true;
-            if (attempt.CleanupRequested &&
-                attempt.CancellationOperations == 0 &&
-                !attempt.CancellationDisposed)
-            {
-                attempt.CancellationDisposed = true;
-                disposeCancellation = attempt.Cancellation;
-            }
+            TryDisposeInspectCaptureCancellationLocked(attempt);
         }
-        disposeCancellation?.Dispose();
+    }
+
+    private void TryDisposeInspectCaptureCancellationLocked(
+        InspectCaptureAttempt attempt)
+    {
+        if (!attempt.CleanupRequested ||
+            !attempt.ProviderTaskSettled ||
+            !attempt.WorkerSettled ||
+            attempt.CancellationOperations != 0 ||
+            pluginLifetimeCancellationOperations != 0 ||
+            attempt.CancellationDisposed)
+        {
+            return;
+        }
+
+        attempt.CancellationDisposed = true;
+        inspectCaptureAttemptsAwaitingDisposal.Remove(attempt);
+        attempt.Cancellation.Dispose();
+    }
+
+    private void DisposeSettledInspectCaptureCancellationsLocked()
+    {
+        foreach (var attempt in inspectCaptureAttemptsAwaitingDisposal.ToArray())
+            TryDisposeInspectCaptureCancellationLocked(attempt);
     }
 
     private string GetCaptureLifecycleDiagnostics()
     {
         var now = DateTime.UtcNow;
+        var hasCurrentInspect = inspectReader.TryGetCurrentInspectEntityId(out var currentInspectEntityId);
         bool inProgress;
         bool requested;
         bool ready;
@@ -766,9 +854,10 @@ public sealed class Plugin : IDalamudPlugin
         long readyGeneration;
         bool hasPreparation;
         bool preparationFocused;
-        bool captureTexturePending;
         string preparationText;
         string captureText;
+        string retiredWorkerText;
+        string capturePhase;
         lock (captureLifecycleSync)
         {
             inProgress = captureInProgress;
@@ -778,17 +867,33 @@ public sealed class Plugin : IDalamudPlugin
             readyGeneration = captureReadyGeneration;
             hasPreparation = inspectCapturePreparation is not null;
             preparationFocused = inspectCapturePreparation?.FocusApplied == true;
-            captureTexturePending = activeInspectCapture?.TexturePending == true;
             preparationText = inspectCapturePreparation is { } preparation
                 ? $"gen={preparation.Generation},entity=0x{preparation.EntityId:X8},focus={preparation.FocusApplied},frames={preparation.FramesRemaining},elapsed={(now - preparation.StartedAtUtc).TotalSeconds:0.0}s"
                 : "none";
-            captureText = activeInspectCapture is { } capture
-                ? $"gen={capture.Generation},entity=0x{capture.EntityId:X8},elapsed={(now - capture.StartedAtUtc).TotalSeconds:0.0}s/{InspectViewportCaptureTimeoutSeconds:0.0}s,pending={capture.TexturePending},cancel={capture.CancellationRequested}"
+            if (activeInspectCapture is { } capture)
+            {
+                var stageName = FormatInspectCaptureStage(capture.Stage);
+                var textureState = capture.TexturePending ? "pending" : capture.ProviderTaskSettled ? "ready" : "settling";
+                var mismatch = hasCurrentInspect && currentInspectEntityId != capture.EntityId;
+                var textureDeadline = capture.Stage == InspectCaptureStage.WaitTexture
+                    ? $",textureElapsed={(now - capture.StageStartedAtUtc).TotalSeconds:0.0}s/{InspectViewportCaptureTimeoutSeconds:0.0}s"
+                    : string.Empty;
+                captureText = $"gen={capture.Generation},entity=0x{capture.EntityId:X8},currentInspect={(hasCurrentInspect ? $"0x{currentInspectEntityId:X8}" : "none")},stage={stageName},elapsed={(now - capture.StartedAtUtc).TotalSeconds:0.0}s/{(capture.DeadlineUtc - capture.StartedAtUtc).TotalSeconds:0.0}s,stageElapsed={(now - capture.StageStartedAtUtc).TotalSeconds:0.0}s{textureDeadline},texture={textureState},worker={(capture.WorkerSettled ? "settled" : "pending")},mismatch={mismatch},retired={capture.Retired},cancel={capture.CancellationRequested}";
+                capturePhase = stageName;
+            }
+            else
+            {
+                captureText = "none";
+                capturePhase = "idle";
+            }
+
+            retiredWorkerText = latestRetiredInspectCapture is { Retired: true, WorkerSettled: false } retired
+                ? $"gen={retired.Generation},entity=0x{retired.EntityId:X8},currentInspect={(hasCurrentInspect ? $"0x{currentInspectEntityId:X8}" : "none")},stage={FormatInspectCaptureStage(retired.Stage)},elapsed={(now - retired.StartedAtUtc).TotalSeconds:0.0}s,stageElapsed={(now - retired.StageStartedAtUtc).TotalSeconds:0.0}s,reason={retired.RetirementReason ?? "unknown"},texture={(retired.TexturePending ? "pending" : "ready")},worker=pending,mismatch={hasCurrentInspect && currentInspectEntityId != retired.EntityId},cancel={retired.CancellationRequested}"
                 : "none";
         }
         var plate = autoPlateCapture;
         var phase = inProgress
-            ? captureTexturePending ? "inspect-texture" : "inspect-processing"
+            ? capturePhase
             : plate is not null
                 ? plate.ReadySinceUtc.HasValue ? "plate-settle" : "plate-load"
                 : hasPreparation
@@ -802,8 +907,25 @@ public sealed class Plugin : IDalamudPlugin
             : $"gen={plate.OriginatingInspectGeneration},entity=0x{plate.EntityId:X8},ready={plate.ReadySinceUtc.HasValue},elapsed={(now - plate.StartedAtUtc).TotalSeconds:0.0}s/{GetAutomaticPlateOverallTimeoutSeconds():0.0}s";
 
         return $"Capture lifecycle: phase={phase}; inProgress={inProgress}; requested={requested}; " +
-               $"prep=[{preparationText}]; ready=[gen={readyGeneration},entity=0x{readyEntityId:X8}]; capture=[{captureText}]; plate=[{plateText}].";
+               $"prep=[{preparationText}]; ready=[gen={readyGeneration},entity=0x{readyEntityId:X8}]; capture=[{captureText}]; retiredWorker=[{retiredWorkerText}]; plate=[{plateText}].";
     }
+
+    private static string FormatInspectCaptureStage(InspectCaptureStage stage) => stage switch
+    {
+        InspectCaptureStage.WaitTexture => "wait-texture",
+        InspectCaptureStage.EncodeReadback => "encode-readback",
+        InspectCaptureStage.PreparePreview => "prepare-preview",
+        InspectCaptureStage.RenderCard => "render-card",
+        InspectCaptureStage.EncodeCard => "encode-card",
+        InspectCaptureStage.EncodePortrait => "encode-portrait",
+        InspectCaptureStage.WritePreview => "write-preview",
+        InspectCaptureStage.WriteCard => "write-card",
+        InspectCaptureStage.WriteJson => "write-json",
+        InspectCaptureStage.Clipboard => "clipboard",
+        InspectCaptureStage.LibraryDatabase => "library-db",
+        InspectCaptureStage.Finalize => "finalize",
+        _ => "unknown",
+    };
 
     private void DrawInspectCaptureButton()
     {
@@ -1470,12 +1592,15 @@ public sealed class Plugin : IDalamudPlugin
                     "The inspected character changed before its preview was requested. Start a fresh capture.");
             }
 
-            unownedCancellation = new CancellationTokenSource();
+            var attemptStartedAtUtc = DateTime.UtcNow;
+            unownedCancellation = CancellationTokenSource.CreateLinkedTokenSource(pluginLifetimeToken);
             attempt = new InspectCaptureAttempt
             {
                 Generation = generation,
                 EntityId = expectedEntityId,
-                StartedAtUtc = DateTime.UtcNow,
+                StartedAtUtc = attemptStartedAtUtc,
+                DeadlineUtc = attemptStartedAtUtc.AddSeconds(InspectCaptureAttemptTimeoutSeconds),
+                StageStartedAtUtc = attemptStartedAtUtc,
                 Cancellation = unownedCancellation,
                 Token = unownedCancellation.Token,
             };
@@ -1486,6 +1611,7 @@ public sealed class Plugin : IDalamudPlugin
                     throw new OperationCanceledException("This Inspect capture attempt is no longer active.");
 
                 activeInspectCapture = attempt;
+                inspectCaptureAttemptsAwaitingDisposal.Add(attempt);
                 captureRequested = false;
                 // Publish busy last after the owning generation and CTS exist.
                 captureInProgress = true;
@@ -1508,7 +1634,8 @@ public sealed class Plugin : IDalamudPlugin
                     attempt.Token);
                 snapshot.Preview = captureRequest.Diagnostics;
 
-                _ = CancelInspectCaptureAtDeadlineAsync(attempt);
+                _ = RetireInspectCaptureAtTextureDeadlineAsync(attempt);
+                _ = RetireInspectCaptureAtOverallDeadlineAsync(attempt);
                 _ = FinishCaptureAsync(snapshot, captureRequest, attempt);
                 lifetimeOperationHeld = false;
                 attempt = null;
@@ -1523,7 +1650,7 @@ public sealed class Plugin : IDalamudPlugin
             if (attempt is not null)
             {
                 MarkInspectProviderTaskSettled(attempt);
-                focusRestore = CompleteInspectCaptureAttempt(attempt);
+                focusRestore = CompleteInspectCaptureAttempt(attempt).FocusRestore;
             }
             else
             {
@@ -1539,14 +1666,27 @@ public sealed class Plugin : IDalamudPlugin
         }
     }
 
-    private async Task CancelInspectCaptureAtDeadlineAsync(InspectCaptureAttempt attempt)
+    private async Task RetireInspectCaptureAtTextureDeadlineAsync(InspectCaptureAttempt attempt)
     {
         await Task.Delay(TimeSpan.FromSeconds(InspectViewportCaptureTimeoutSeconds));
 
-        CancelInspectCaptureAttempt(
+        RetireInspectCaptureAttempt(
             attempt,
+            "texture-timeout",
             $"Capture timed out after {InspectViewportCaptureTimeoutSeconds:0} seconds waiting for the Inspect preview.",
             onlyWhileTexturePending: true);
+    }
+
+    private async Task RetireInspectCaptureAtOverallDeadlineAsync(InspectCaptureAttempt attempt)
+    {
+        var delay = attempt.DeadlineUtc - DateTime.UtcNow;
+        if (delay > TimeSpan.Zero)
+            await Task.Delay(delay);
+
+        RetireInspectCaptureAttempt(
+            attempt,
+            "deadline",
+            $"Capture exceeded the {InspectCaptureAttemptTimeoutSeconds:0}-second overall Inspect deadline.");
     }
 
     private FocusRestoreState TakeFocusRestoreStateLocked(long generation)
@@ -1604,12 +1744,37 @@ public sealed class Plugin : IDalamudPlugin
         pluginLifetimeToken.ThrowIfCancellationRequested();
         lock (captureLifecycleSync)
         {
-            if (disposed ||
-                !ReferenceEquals(activeInspectCapture, attempt) ||
-                latestInspectCaptureGeneration != attempt.Generation)
+            if (!InspectCaptureHasAuthorityLocked(attempt))
             {
                 throw new OperationCanceledException("This Inspect capture attempt no longer owns the active lifecycle.");
             }
+        }
+    }
+
+    private bool InspectCaptureHasAuthority(InspectCaptureAttempt attempt)
+    {
+        lock (captureLifecycleSync)
+            return InspectCaptureHasAuthorityLocked(attempt);
+    }
+
+    private bool InspectCaptureHasAuthorityLocked(InspectCaptureAttempt attempt) =>
+        !disposed &&
+        !pluginLifetimeToken.IsCancellationRequested &&
+        !attempt.Retired &&
+        !attempt.Token.IsCancellationRequested &&
+        ReferenceEquals(activeInspectCapture, attempt) &&
+        latestInspectCaptureGeneration == attempt.Generation;
+
+    private void SetInspectCaptureStage(InspectCaptureAttempt attempt, InspectCaptureStage stage)
+    {
+        EnsureInspectCaptureCanCommit(attempt);
+        lock (captureLifecycleSync)
+        {
+            if (!InspectCaptureHasAuthorityLocked(attempt))
+                throw new OperationCanceledException("This Inspect capture attempt no longer owns the active lifecycle.");
+
+            attempt.Stage = stage;
+            attempt.StageStartedAtUtc = DateTime.UtcNow;
         }
     }
 
@@ -1623,6 +1788,11 @@ public sealed class Plugin : IDalamudPlugin
         string? libraryWarning = null;
         long? libraryEntryId = null;
         var textureAcquired = false;
+        Dalamud.Interface.Textures.TextureWraps.IDalamudTextureWrap? texture = null;
+        var stagedFiles = new List<StagedInspectFile>();
+        string? managedCaptureDirectory = null;
+        var finalFilePromotionStarted = false;
+        var finalFilesPublished = false;
 
         try
         {
@@ -1631,7 +1801,7 @@ public sealed class Plugin : IDalamudPlugin
             var stamp = DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss");
             var baseName = $"{safeCharacter}_{safeWorld}_{stamp}";
 
-            using var texture = await captureRequest.TextureTask.WaitAsync(attempt.Token);
+            texture = await captureRequest.TextureTask.WaitAsync(attempt.Token);
             textureAcquired = true;
             lock (captureLifecycleSync)
             {
@@ -1640,31 +1810,35 @@ public sealed class Plugin : IDalamudPlugin
             }
 
             EnsureInspectCaptureCanCommit(attempt);
-            var previewBytes = await previewCaptureService.EncodePngAsync(texture, pluginLifetimeToken);
+            SetInspectCaptureStage(attempt, InspectCaptureStage.EncodeReadback);
+            var previewBytes = await previewCaptureService.EncodePngAsync(texture, attempt.Token);
             EnsureInspectCaptureCanCommit(attempt);
 
             var renderedCapture = await glamCardRenderer.RenderCaptureAsync(
                 snapshot,
                 previewBytes,
                 Configuration.CleanupItemLevelOverlay,
-                pluginLifetimeToken);
+                attempt.Token,
+                stage => SetInspectCaptureStage(attempt, stage switch
+                {
+                    GlamCardRenderStage.PreparePreview => InspectCaptureStage.PreparePreview,
+                    GlamCardRenderStage.RenderCard => InspectCaptureStage.RenderCard,
+                    GlamCardRenderStage.EncodeCard => InspectCaptureStage.EncodeCard,
+                    GlamCardRenderStage.EncodePortrait => InspectCaptureStage.EncodePortrait,
+                    _ => throw new ArgumentOutOfRangeException(nameof(stage)),
+                }));
             var cardBytes = renderedCapture.CardPng;
             EnsureInspectCaptureCanCommit(attempt);
 
             string captureDirectory;
-            lock (captureLifecycleSync)
-            {
-                EnsureInspectCaptureCanCommit(attempt);
-                Directory.CreateDirectory(Configuration.OutputDirectory);
-
-                // M3.12 keeps newly indexed captures together in one per-entry
-                // media directory. Starting this side effect while holding the
-                // lifetime gate means Dispose cannot begin between validation
-                // and creation.
-                captureDirectory = Configuration.AutoAddToLibrary && libraryStore is not null
-                    ? libraryStore.CreateCaptureMediaDirectory(baseName)
-                    : Configuration.OutputDirectory;
-            }
+            EnsureInspectCaptureCanCommit(attempt);
+            Directory.CreateDirectory(Configuration.OutputDirectory);
+            captureDirectory = Configuration.AutoAddToLibrary && libraryStore is not null
+                ? libraryStore.CreateCaptureMediaDirectory(baseName)
+                : Configuration.OutputDirectory;
+            if (Configuration.AutoAddToLibrary && libraryStore is not null)
+                managedCaptureDirectory = captureDirectory;
+            EnsureInspectCaptureCanCommit(attempt);
 
             var cardPath = Configuration.AutoAddToLibrary && libraryStore is not null
                 ? Path.Combine(captureDirectory, "glam-card.png")
@@ -1688,37 +1862,15 @@ public sealed class Plugin : IDalamudPlugin
                 // Inspect preview. Personal Fitting Room previews remain on
                 // their independent native capture path.
                 var storedPreviewBytes = renderedCapture.PreparedPortraitPng;
-                EnsureInspectCaptureCanCommit(attempt);
-                Task writePreviewTask;
-                lock (captureLifecycleSync)
-                {
-                    EnsureInspectCaptureCanCommit(attempt);
-                    writePreviewTask = File.WriteAllBytesAsync(rawPath, storedPreviewBytes, pluginLifetimeToken);
-                }
-                await writePreviewTask;
+                SetInspectCaptureStage(attempt, InspectCaptureStage.WritePreview);
+                stagedFiles.Add(await WriteInspectStagingFileAsync(
+                    attempt,
+                    rawPath,
+                    storedPreviewBytes));
             }
 
-            Task writeCardTask;
-            lock (captureLifecycleSync)
-            {
-                EnsureInspectCaptureCanCommit(attempt);
-                writeCardTask = File.WriteAllBytesAsync(cardPath, cardBytes, pluginLifetimeToken);
-            }
-            await writeCardTask;
-
-            if (Configuration.CopyToClipboard)
-            {
-                Task copyTask;
-                lock (captureLifecycleSync)
-                {
-                    EnsureInspectCaptureCanCommit(attempt);
-                    copyTask = previewCaptureService.CopyPngBytesToClipboardAsync(
-                        cardBytes,
-                        Path.GetFileNameWithoutExtension(cardPath),
-                        pluginLifetimeToken);
-                }
-                await copyTask;
-            }
+            SetInspectCaptureStage(attempt, InspectCaptureStage.WriteCard);
+            stagedFiles.Add(await WriteInspectStagingFileAsync(attempt, cardPath, cardBytes));
 
             if (Configuration.WriteDiagnosticJson)
             {
@@ -1726,28 +1878,41 @@ public sealed class Plugin : IDalamudPlugin
                 {
                     WriteIndented = true,
                 });
-                Task writeJsonTask;
-                lock (captureLifecycleSync)
-                {
-                    EnsureInspectCaptureCanCommit(attempt);
-                    writeJsonTask = File.WriteAllTextAsync(jsonPath, json, pluginLifetimeToken);
-                }
-                await writeJsonTask;
+                SetInspectCaptureStage(attempt, InspectCaptureStage.WriteJson);
+                stagedFiles.Add(await WriteInspectStagingTextFileAsync(attempt, jsonPath, json));
             }
+
+            if (Configuration.CopyToClipboard)
+            {
+                SetInspectCaptureStage(attempt, InspectCaptureStage.Clipboard);
+                await previewCaptureService.CopyPngBytesToClipboardAsync(
+                    cardBytes,
+                    Path.GetFileNameWithoutExtension(cardPath),
+                    attempt.Token);
+                EnsureInspectCaptureCanCommit(attempt);
+            }
+
+            SetInspectCaptureStage(attempt, InspectCaptureStage.Finalize);
+            finalFilePromotionStarted = true;
+            PublishInspectStagingFiles(attempt, stagedFiles);
+            finalFilesPublished = true;
 
             if (Configuration.AutoAddToLibrary && libraryStore is not null)
             {
                 try
                 {
-                    lock (captureLifecycleSync)
-                    {
-                        EnsureInspectCaptureCanCommit(attempt);
-                        libraryEntryId = libraryStore.AddCapture(
-                            snapshot,
-                            cardPath,
-                            keepPreviewImage ? rawPath : null,
-                            Configuration.WriteDiagnosticJson ? jsonPath : null);
-                    }
+                    SetInspectCaptureStage(attempt, InspectCaptureStage.LibraryDatabase);
+                    libraryEntryId = libraryStore.AddCapture(
+                        snapshot,
+                        cardPath,
+                        keepPreviewImage ? rawPath : null,
+                        Configuration.WriteDiagnosticJson ? jsonPath : null,
+                        () => InspectCaptureHasAuthority(attempt));
+                    EnsureInspectCaptureCanCommit(attempt);
+                }
+                catch (OperationCanceledException) when (!InspectCaptureHasAuthority(attempt))
+                {
+                    throw;
                 }
                 catch (Exception ex)
                 {
@@ -1759,6 +1924,8 @@ public sealed class Plugin : IDalamudPlugin
                 }
             }
 
+            SetInspectCaptureStage(attempt, InspectCaptureStage.Finalize);
+            EnsureInspectCaptureCanCommit(attempt);
             successMessage = $"Captured Glam Card for {snapshot.CharacterName} @ {snapshot.HomeWorld} → {cardPath}";
         }
         catch (OperationCanceledException) when (
@@ -1766,13 +1933,9 @@ public sealed class Plugin : IDalamudPlugin
             pluginLifetimeToken.IsCancellationRequested ||
             !IsCurrentGeneration(attempt.Generation))
         {
-            if (IsPluginLifetimeValid())
-            {
-                lock (captureLifecycleSync)
-                    errorMessage = attempt.CancellationReason;
-                errorMessage ??= $"Capture timed out after {InspectViewportCaptureTimeoutSeconds:0} seconds waiting for the Inspect preview.";
-                Log.Warning($"GlamSpector Inspect capture cancelled: {errorMessage}");
-            }
+            // Retirement owns user-visible cancellation reporting. A worker may
+            // resume long after a newer generation starts, so it must remain
+            // silent and only unwind its local resources here.
         }
         catch (Exception ex)
         {
@@ -1784,39 +1947,176 @@ public sealed class Plugin : IDalamudPlugin
         }
         finally
         {
+            try
+            {
+                texture?.Dispose();
+            }
+            catch (Exception ex)
+            {
+                if (IsPluginLifetimeValid())
+                    Log.Warning(ex, "Could not dispose the Inspect capture texture cleanly.");
+            }
+            CleanupInspectStagingFiles(stagedFiles);
+            if (!finalFilesPublished && managedCaptureDirectory is not null)
+                TryDeleteEmptyInspectCaptureDirectory(managedCaptureDirectory);
+
             var releaseLifetimeHere = textureAcquired;
             if (!textureAcquired)
             {
                 _ = ObserveLateCaptureTextureAsync(captureRequest.TextureTask, attempt);
             }
 
-            var focusRestore = CompleteInspectCaptureAttempt(attempt);
+            var completion = CompleteInspectCaptureAttempt(attempt);
+            if (!completion.CompletedWithAuthority &&
+                finalFilePromotionStarted &&
+                !libraryEntryId.HasValue &&
+                managedCaptureDirectory is not null)
+            {
+                CleanupPublishedInspectFiles(stagedFiles);
+                TryDeleteEmptyInspectCaptureDirectory(managedCaptureDirectory);
+            }
             try
             {
-                QueueLifetimeFrameworkCallback(() =>
+                if (completion.CompletedWithAuthority)
                 {
-                    RestorePreviousFocusedAddon(focusRestore.PreviousId, focusRestore.InspectId);
-                    if (libraryEntryId.HasValue)
+                    QueueLifetimeFrameworkCallback(() =>
                     {
-                        libraryUi?.NotifyLibraryChanged(libraryEntryId.Value);
-                        QueueAdventurerPlateCaptureIfConfigured(
-                            libraryEntryId.Value,
-                            snapshot,
-                            attempt.Generation);
-                    }
-                    if (successMessage is not null && Configuration.NotifyCaptureSuccess)
-                        ChatGui.Print(successMessage, "GlamSpector");
-                    if (libraryWarning is not null)
-                        ChatGui.PrintError(libraryWarning, "GlamSpector");
-                    if (errorMessage is not null)
-                        ChatGui.PrintError(errorMessage, "GlamSpector");
-                }, attempt.Generation);
+                        RestorePreviousFocusedAddon(
+                            completion.FocusRestore.PreviousId,
+                            completion.FocusRestore.InspectId);
+                        if (libraryEntryId.HasValue)
+                        {
+                            libraryUi?.NotifyLibraryChanged(libraryEntryId.Value);
+                            QueueAdventurerPlateCaptureIfConfigured(
+                                libraryEntryId.Value,
+                                snapshot,
+                                attempt.Generation);
+                        }
+                        if (successMessage is not null && Configuration.NotifyCaptureSuccess)
+                            ChatGui.Print(successMessage, "GlamSpector");
+                        if (libraryWarning is not null)
+                            ChatGui.PrintError(libraryWarning, "GlamSpector");
+                        if (errorMessage is not null)
+                            ChatGui.PrintError(errorMessage, "GlamSpector");
+                    }, attempt.Generation);
+                }
             }
             finally
             {
                 if (releaseLifetimeHere)
                     ReleasePluginLifetimeOperation();
             }
+        }
+    }
+
+    private async Task<StagedInspectFile> WriteInspectStagingFileAsync(
+        InspectCaptureAttempt attempt,
+        string finalPath,
+        ReadOnlyMemory<byte> bytes)
+    {
+        EnsureInspectCaptureCanCommit(attempt);
+        var temporaryPath = GetInspectStagingPath(finalPath, attempt.Generation);
+        var finalExistedBefore = File.Exists(finalPath);
+        try
+        {
+            await File.WriteAllBytesAsync(temporaryPath, bytes, attempt.Token);
+            EnsureInspectCaptureCanCommit(attempt);
+            return new StagedInspectFile(temporaryPath, finalPath, finalExistedBefore);
+        }
+        catch
+        {
+            TryDeleteInspectStagingFile(temporaryPath);
+            throw;
+        }
+    }
+
+    private async Task<StagedInspectFile> WriteInspectStagingTextFileAsync(
+        InspectCaptureAttempt attempt,
+        string finalPath,
+        string contents)
+    {
+        EnsureInspectCaptureCanCommit(attempt);
+        var temporaryPath = GetInspectStagingPath(finalPath, attempt.Generation);
+        var finalExistedBefore = File.Exists(finalPath);
+        try
+        {
+            await File.WriteAllTextAsync(temporaryPath, contents, attempt.Token);
+            EnsureInspectCaptureCanCommit(attempt);
+            return new StagedInspectFile(temporaryPath, finalPath, finalExistedBefore);
+        }
+        catch
+        {
+            TryDeleteInspectStagingFile(temporaryPath);
+            throw;
+        }
+    }
+
+    private void PublishInspectStagingFiles(
+        InspectCaptureAttempt attempt,
+        IReadOnlyList<StagedInspectFile> stagedFiles)
+    {
+        EnsureInspectCaptureCanCommit(attempt);
+        foreach (var staged in stagedFiles)
+        {
+            EnsureInspectCaptureCanCommit(attempt);
+            File.Move(staged.TemporaryPath, staged.FinalPath, overwrite: true);
+            EnsureInspectCaptureCanCommit(attempt);
+        }
+    }
+
+    private static string GetInspectStagingPath(string finalPath, long generation) =>
+        finalPath + $".glamspector-gen-{generation}.tmp";
+
+    private static void CleanupInspectStagingFiles(IEnumerable<StagedInspectFile> stagedFiles)
+    {
+        foreach (var staged in stagedFiles)
+            TryDeleteInspectStagingFile(staged.TemporaryPath);
+    }
+
+    private static void CleanupPublishedInspectFiles(IEnumerable<StagedInspectFile> stagedFiles)
+    {
+        foreach (var staged in stagedFiles)
+        {
+            if (staged.FinalExistedBefore)
+                continue;
+
+            try
+            {
+                if (File.Exists(staged.FinalPath))
+                    File.Delete(staged.FinalPath);
+            }
+            catch
+            {
+                // Best-effort rollback of media published immediately before a
+                // retirement race. Never delete a path that predated the attempt.
+            }
+        }
+    }
+
+    private static void TryDeleteInspectStagingFile(string path)
+    {
+        try
+        {
+            if (File.Exists(path))
+                File.Delete(path);
+        }
+        catch
+        {
+            // Best effort. A worker-owned write may still be unwinding after
+            // cancellation; the generation-specific name prevents publication.
+        }
+    }
+
+    private static void TryDeleteEmptyInspectCaptureDirectory(string path)
+    {
+        try
+        {
+            if (Directory.Exists(path) && !Directory.EnumerateFileSystemEntries(path).Any())
+                Directory.Delete(path);
+        }
+        catch
+        {
+            // Best-effort cleanup only; never risk deleting non-empty user data.
         }
     }
 

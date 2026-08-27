@@ -14,6 +14,14 @@ using SixLabors.ImageSharp.Processing;
 
 namespace GlamSpector.Services;
 
+public enum GlamCardRenderStage
+{
+    PreparePreview,
+    RenderCard,
+    EncodeCard,
+    EncodePortrait,
+}
+
 public sealed class GlamCardRenderer
 {
     private const int CardWidth = 1600;
@@ -52,17 +60,22 @@ public sealed class GlamCardRenderer
             preview,
             titleOverride,
             subtitleOverride,
-            cancellationToken);
+            cancellationToken,
+            progress: null);
     }
 
     public async Task<GlamCardCaptureRenderResult> RenderCaptureAsync(
         GlamourSnapshot snapshot,
         ReadOnlyMemory<byte> previewPng,
         bool cleanItemLevelOverlay,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        Action<GlamCardRenderStage>? progress = null)
     {
+        cancellationToken.ThrowIfCancellationRequested();
+        progress?.Invoke(GlamCardRenderStage.PreparePreview);
         using var sourcePreview = Image.Load<Rgba32>(previewPng.ToArray());
         using var preparedPortrait = PreparePreview(sourcePreview, cleanItemLevelOverlay);
+        cancellationToken.ThrowIfCancellationRequested();
 
         // The card and the standalone automatic Inspect preview consume the
         // exact same prepared image. Encoding the portrait does not mutate it,
@@ -72,8 +85,11 @@ public sealed class GlamCardRenderer
             preparedPortrait,
             titleOverride: null,
             subtitleOverride: null,
-            cancellationToken: cancellationToken);
+            cancellationToken: cancellationToken,
+            progress: progress);
 
+        cancellationToken.ThrowIfCancellationRequested();
+        progress?.Invoke(GlamCardRenderStage.EncodePortrait);
         await using var portraitOutput = new MemoryStream();
         await preparedPortrait.SaveAsPngAsync(portraitOutput, cancellationToken);
         return new GlamCardCaptureRenderResult(cardPng, portraitOutput.ToArray());
@@ -84,8 +100,11 @@ public sealed class GlamCardRenderer
         Image<Rgba32> preview,
         string? titleOverride,
         string? subtitleOverride,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Action<GlamCardRenderStage>? progress)
     {
+        cancellationToken.ThrowIfCancellationRequested();
+        progress?.Invoke(GlamCardRenderStage.RenderCard);
         using var card = new Image<Rgba32>(CardWidth, CardHeight, new Rgba32(17, 35, 48));
 
         var previewDest = FitInside(preview.Width, preview.Height, new Rectangle(72, 188, 495, 730));
@@ -136,6 +155,8 @@ public sealed class GlamCardRenderer
             DrawWeapon(ctx, Find(snapshot.Pieces, "Off Hand"), "Off Hand", 1080, 826, 410);
         });
 
+        cancellationToken.ThrowIfCancellationRequested();
+        progress?.Invoke(GlamCardRenderStage.EncodeCard);
         await using var output = new MemoryStream();
         await card.SaveAsPngAsync(output, cancellationToken);
         return output.ToArray();

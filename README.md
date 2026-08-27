@@ -1,5 +1,54 @@
 # GlamSpector
 
+## M3.15.3 — Inspect watchdog and stale-worker retirement
+
+- Keeps the existing 10-second CharacterInspect viewport-texture timeout and
+  adds a separate 30-second deadline for the complete Inspect capture attempt,
+  including readback, portrait/card preparation, PNG encoding, file writes,
+  clipboard work and Library publication.
+- Continues checking valid, ready, nonzero CharacterInspect identity after the
+  texture arrives. If Inspect moves from character A to character B, A loses
+  lifecycle ownership immediately; a closed/unready/zero Inspect alone remains
+  tolerated after acquisition for transient duty churn.
+- Separates lifecycle availability from worker/resource lifetime. An abandoned
+  worker may finish privately, but cannot keep Capture busy or publish later UI,
+  Plate, focus, notification, file or Library side effects. Its CTS and local
+  resources remain alive until both the worker and texture provider settle.
+- Passes the attempt-linked plugin/capture cancellation token through readback,
+  Full Card and prepared-portrait encoding, staged file writes and clipboard
+  work. Synchronous image operations are guarded before and after rather than
+  pretending they are preemptible.
+- Writes automatic Inspect media to generation-specific staging files and
+  promotes them only after a final ownership check. SQLite work no longer runs
+  under the capture-lifecycle lock and rechecks ownership immediately before
+  transaction commit.
+- Expands `/glamspector debug` with the active generation/entity, current Inspect
+  entity, exact processing stage, whole-attempt and stage elapsed time, texture
+  and worker state, mismatch/retirement state, and any still-unwinding retired
+  worker. The 10-second value is shown only for `wait-texture`.
+
+### Suggested M3.15.3 torture test
+
+1. Capture normally with automatic Library indexing, clipboard and diagnostics
+   enabled. Confirm the Inspect Preview, Full Card, Library row, notification and
+   configured Plate workflow remain unchanged.
+2. During viewport loading, close CharacterInspect or switch from A to B. Confirm
+   A retires promptly, no A media/Library row appears later, and B can be captured.
+3. Rapidly switch from A to B during readback, card rendering and PNG/file work.
+   Confirm Capture becomes available immediately when valid B appears and no late
+   A clipboard, success notification, Plate request or focus restoration occurs.
+4. Repeat inside a duty while actors enter/leave ObjectTable. Closing/unready/zero
+   Inspect after texture acquisition must not alone prove replacement, but a valid
+   nonzero B must retire A.
+5. Run `/glamspector debug` throughout. Confirm stages such as `wait-texture`,
+   `encode-readback`, `prepare-preview`, `render-card`, `encode-card`,
+   `encode-portrait`, `write-*`, `clipboard`, `library-db` and `finalize` report
+   separate total/stage timing. A deliberately stalled attempt must return the UI
+   to idle by 30 seconds and may appear only under `retiredWorker` while unwinding.
+6. Reload the plugin during texture acquisition and during post-texture processing.
+   Confirm the old instance produces no later files, Library/UI updates, clipboard
+   changes, Plate actions, notifications or focus changes.
+
 ## M3.15.2 — Preview/import/update polish
 
 - Automatic CharacterInspect capture now prepares its portrait once through

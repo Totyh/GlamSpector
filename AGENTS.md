@@ -8,9 +8,9 @@ This repository is developed iteratively with the user. Product/design decisions
 
 ## Current baseline
 
-- Current milestone at handoff: **M3.15.2**
+- Current milestone at handoff: **M3.15.3**
 - Project SDK: `Dalamud.NET.Sdk/15.0.0`
-- Project version: `0.3.15.2`
+- Project version: `0.3.15.3`
 - Current resolved target in `packages.lock.json`: `net10.0-windows7.0`
 - Important packages include `Microsoft.Data.Sqlite`, `SQLitePCLRaw.bundle_e_sqlite3`, `SixLabors.ImageSharp`, and `SixLabors.ImageSharp.Drawing`.
 
@@ -117,6 +117,14 @@ Important rules:
 - Automatic Inspect previews are frame-free prepared portraits. Personal
   Fitting Room previews remain native framed captures and use component node 31;
   `bottomRatio: 0.879` remains their fallback only.
+
+Inspect capture lifecycle ownership is deliberately separate from worker/resource
+lifetime. A capture has a 10-second viewport-texture deadline and a 30-second
+whole-attempt deadline. A timed-out or target-stale worker may unwind privately,
+but must immediately stop blocking new captures and must not publish media,
+Library state, clipboard data, Plate work, focus changes, or notifications.
+Do not collapse this back into "busy until the worker returns" or dispose a
+retired worker's resources before that worker/provider has actually settled.
 
 Terminology matters:
 - "preview" means character/appearance imagery;
