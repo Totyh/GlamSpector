@@ -36,14 +36,14 @@ jobs:
 
       - name: Validate tag and release metadata
         shell: pwsh
-        run: .\scripts\Validate-Release.ps1 -ReleaseTag $env:GITHUB_REF_NAME
+        run: .\scripts\Validate-Release.ps1 -Channel Testing -ReleaseTag $env:GITHUB_REF_NAME
 
       - name: Build Release package
         run: dotnet build .\GlamSpector.csproj --no-restore --configuration Release --verbosity minimal --warnaserror
 
       - name: Validate packaged release
         shell: pwsh
-        run: .\scripts\Validate-Release.ps1 -ReleaseTag $env:GITHUB_REF_NAME -PackagePath .\bin\Release\GlamSpector\latest.zip
+        run: .\scripts\Validate-Release.ps1 -Channel Testing -ReleaseTag $env:GITHUB_REF_NAME -PackagePath .\bin\Release\GlamSpector\latest.zip
 
       - name: Publish GitHub Release
         shell: pwsh

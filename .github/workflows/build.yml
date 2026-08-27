@@ -38,14 +38,14 @@ jobs:
 
       - name: Validate release metadata
         shell: pwsh
-        run: .\scripts\Validate-Release.ps1
+        run: .\scripts\Validate-Release.ps1 -Channel Testing
 
       - name: Build Release package
         run: dotnet build .\GlamSpector.csproj --no-restore --configuration Release --verbosity minimal --warnaserror
 
       - name: Validate packaged release
         shell: pwsh
-        run: .\scripts\Validate-Release.ps1 -PackagePath .\bin\Release\GlamSpector\latest.zip
+        run: .\scripts\Validate-Release.ps1 -Channel Testing -PackagePath .\bin\Release\GlamSpector\latest.zip
 
       - name: Upload packaged plugin
         uses: actions/upload-artifact@v7

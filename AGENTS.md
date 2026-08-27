@@ -225,6 +225,13 @@ tag that exact commit `vX.Y.Z` and push the tag. The tag-only workflow publishes
 that generated ZIP to the matching GitHub Release; it must not rewrite or push
 `repo.json`. Do not tag until the package and metadata have been reviewed.
 
+For an opt-in testing release, leave stable `AssemblyVersion` and install/update
+URLs pinned to the last accepted stable asset, add the newer testing version/API/
+changelog/download fields, and validate/build/tag with
+`Validate-Release.ps1 -Channel Testing`. Stable promotion later changes only the
+repository channel metadata to reuse the exact immutable tested release asset;
+do not rebuild or replace that tagged ZIP.
+
 The distributable package intentionally includes only GlamSpector's required
 managed dependencies and the Windows x64 SQLite native runtime. Keep local
 Library databases, configuration, screenshots/media, logs, build paths, and

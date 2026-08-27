@@ -1,5 +1,7 @@
 [CmdletBinding()]
 param(
+    [ValidateSet('Stable', 'Testing')]
+    [string]$Channel = 'Stable',
     [string]$ReleaseTag,
     [string]$PackagePath
 )
@@ -61,10 +63,41 @@ $entry = $repositoryEntries[0]
 Assert-Equal 'Source manifest InternalName' $sourceManifest.InternalName 'GlamSpector'
 Assert-Equal 'Source manifest DalamudApiLevel' $sourceManifest.DalamudApiLevel $expectedApiLevel
 Assert-Equal 'Repository InternalName' $entry.InternalName 'GlamSpector'
-Assert-Equal 'Repository AssemblyVersion' $entry.AssemblyVersion $projectVersion
 Assert-Equal 'Repository DalamudApiLevel' $entry.DalamudApiLevel $expectedApiLevel
-Assert-ReleaseAssetUrl 'DownloadLinkInstall' $entry.DownloadLinkInstall $projectVersion
-Assert-ReleaseAssetUrl 'DownloadLinkUpdate' $entry.DownloadLinkUpdate $projectVersion
+Assert-Equal 'Repository IsTestingExclusive' $entry.IsTestingExclusive $false
+Assert-ReleaseAssetUrl 'DownloadLinkInstall' $entry.DownloadLinkInstall $entry.AssemblyVersion
+Assert-ReleaseAssetUrl 'DownloadLinkUpdate' $entry.DownloadLinkUpdate $entry.AssemblyVersion
+
+$hasTestingChannel = -not [string]::IsNullOrWhiteSpace([string]$entry.TestingAssemblyVersion)
+if ($hasTestingChannel) {
+    Assert-Equal 'Repository TestingDalamudApiLevel' $entry.TestingDalamudApiLevel $expectedApiLevel
+    Assert-ReleaseAssetUrl 'DownloadLinkTesting' $entry.DownloadLinkTesting $entry.TestingAssemblyVersion
+    if ([string]::IsNullOrWhiteSpace([string]$entry.TestingChangelog)) {
+        throw 'TestingChangelog must describe the opt-in testing build.'
+    }
+
+    try {
+        $stableVersion = [version]$entry.AssemblyVersion
+        $testingVersion = [version]$entry.TestingAssemblyVersion
+    }
+    catch {
+        throw "Repository stable/testing versions must be valid System.Version values: $($_.Exception.Message)"
+    }
+    if ($testingVersion -le $stableVersion) {
+        throw "TestingAssemblyVersion '$testingVersion' must be newer than stable AssemblyVersion '$stableVersion'."
+    }
+}
+elseif ($Channel -eq 'Testing') {
+    throw 'Testing validation requires TestingAssemblyVersion, TestingDalamudApiLevel, and DownloadLinkTesting.'
+}
+
+$advertisedVersion = if ($Channel -eq 'Testing') {
+    [string]$entry.TestingAssemblyVersion
+}
+else {
+    [string]$entry.AssemblyVersion
+}
+Assert-Equal "$Channel repository version" $advertisedVersion $projectVersion
 
 if (-not [string]::IsNullOrWhiteSpace($ReleaseTag)) {
     Assert-Equal 'Release tag' $ReleaseTag "v$projectVersion"
@@ -138,4 +171,4 @@ if (-not [string]::IsNullOrWhiteSpace($PackagePath)) {
     }
 }
 
-Write-Host "Release metadata is consistent: GlamSpector $projectVersion, Dalamud API $expectedApiLevel."
+Write-Host "Release metadata is consistent for the $Channel channel: GlamSpector $projectVersion, Dalamud API $expectedApiLevel."
