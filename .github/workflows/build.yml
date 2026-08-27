@@ -1,0 +1,55 @@
+name: Build
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.x
+          dotnet-quality: ga
+
+      - name: Download Dalamud development files
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'dalamud.zip'
+          $directory = Join-Path $env:RUNNER_TEMP 'dalamud'
+          Invoke-WebRequest 'https://goatcorp.github.io/dalamud-distrib/latest.zip' -OutFile $archive
+          Expand-Archive -LiteralPath $archive -DestinationPath $directory
+          "DALAMUD_HOME=$directory" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Restore locked dependencies
+        run: dotnet restore .\GlamSpector.csproj --locked-mode --verbosity normal
+
+      - name: Validate release metadata
+        shell: pwsh
+        run: .\scripts\Validate-Release.ps1
+
+      - name: Build Release package
+        run: dotnet build .\GlamSpector.csproj --no-restore --configuration Release --verbosity minimal --warnaserror
+
+      - name: Validate packaged release
+        shell: pwsh
+        run: .\scripts\Validate-Release.ps1 -PackagePath .\bin\Release\GlamSpector\latest.zip
+
+      - name: Upload packaged plugin
+        uses: actions/upload-artifact@v7
+        with:
+          name: GlamSpector-latest-zip
+          path: bin/Release/GlamSpector/latest.zip
+          if-no-files-found: error

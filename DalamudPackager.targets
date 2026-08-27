@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project>
+  <!--
+    Dalamud.NET.Sdk's default Release target packages the entire output folder.
+    GlamSpector needs only its managed dependencies and the Windows x64 SQLite
+    native library, so keep the public package explicit and platform-specific.
+  -->
+  <Target Name="PackageGlamSpectorDebug"
+          AfterTargets="Build"
+          Condition="'$(Configuration)' == 'Debug'">
+    <DalamudPackager ProjectDir="$(ProjectDir)"
+                     OutputPath="$(OutputPath)"
+                     AssemblyName="$(AssemblyName)"
+                     MakeZip="false" />
+  </Target>
+
+  <Target Name="PackageGlamSpectorRelease"
+          AfterTargets="Build"
+          Condition="'$(Configuration)' == 'Release'">
+    <DalamudPackager ProjectDir="$(ProjectDir)"
+                     OutputPath="$(OutputPath)"
+                     AssemblyName="$(AssemblyName)"
+                     MakeZip="true"
+                     Include="GlamSpector.dll;GlamSpector.deps.json;GlamSpector.json;Microsoft.Data.Sqlite.dll;SixLabors.Fonts.dll;SixLabors.ImageSharp.dll;SixLabors.ImageSharp.Drawing.dll;SQLitePCLRaw.batteries_v2.dll;SQLitePCLRaw.core.dll;SQLitePCLRaw.provider.e_sqlite3.dll;runtimes\win-x64\native\e_sqlite3.dll" />
+  </Target>
+</Project>

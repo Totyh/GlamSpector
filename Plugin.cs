@@ -353,7 +353,7 @@ public sealed class Plugin : IDalamudPlugin
         Framework.Update += OnFrameworkUpdate;
 
         HandleVersionUpdateNotification(hadSavedConfiguration);
-        Log.Information("GlamSpector Milestone 3.15.4 loaded.");
+        Log.Information("GlamSpector Milestone 3.15.5 loaded.");
     }
 
     private void HandleVersionUpdateNotification(bool hadSavedConfiguration)

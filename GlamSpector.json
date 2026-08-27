@@ -1,9 +1,12 @@
 {
-  "Author": "Private development build",
+  "Author": "Totyh",
   "Name": "GlamSpector",
+  "InternalName": "GlamSpector",
   "Punchline": "Capture inspected glamours and keep a searchable Glamour Library.",
-  "Description": "Milestone 3.15.4 development build. Manually virtualizes the Library entry list and caches per-entry media presentation so steady-state rendering processes only visible rows. Retains the M3.15.3 whole-attempt Inspect watchdog, all-phase target monitoring and stale-worker publication guards plus manual-only Eorzea Collection import, update notifications, editable Library titles, remembered Library UI state, personal previews, Share Cards, Glam Codes, Wanted items, ownership progress, Try On, ratings, tags/notes, and managed media. /glamspector library | config",
+  "Description": "Capture inspected character glamours into a searchable local Library with previews, gear and dye recipes, ownership tracking, personal previews, and sharing tools. /glamspector library | config",
   "ApplicableVersion": "any",
+  "RepoUrl": "https://github.com/Totyh/GlamSpector",
+  "DalamudApiLevel": 15,
   "Tags": [
     "glamour",
     "inspect",

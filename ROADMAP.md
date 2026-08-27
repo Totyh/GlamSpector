@@ -1,6 +1,6 @@
 # ROADMAP.md — GlamSpector
 
-Current baseline: **M3.15.4, Library rendering performance**
+Current baseline: **M3.15.5, Distribution and custom repository**
 
 Version labels below are planning candidates and can change after discussion. Do not treat an unimplemented roadmap item as an approved behavior unless the user explicitly requests it.
 
@@ -37,6 +37,9 @@ Completed before M3.15:
 - The left Library list is fixed-height and virtualized; per-entry primary
   media and gallery availability are cached in the current UI snapshot so
   off-screen rows perform no filesystem or texture-provider work (M3.15.4).
+- GlamSpector has a version-pinned custom Dalamud repository manifest,
+  validated DalamudPackager Release ZIP, Windows CI build artifact, and
+  tag-gated GitHub Release workflow (M3.15.5).
 
 ## Short-term polish candidates
 

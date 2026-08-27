@@ -1,5 +1,47 @@
 # GlamSpector
 
+## Installation
+
+GlamSpector is distributed through a third-party Dalamud custom plugin
+repository. Friends do not need to compile the plugin themselves.
+
+1. Open Dalamud/XIVLauncher settings and go to **Experimental** → **Custom
+   Plugin Repositories**.
+2. Add `https://raw.githubusercontent.com/Totyh/GlamSpector/main/repo.json`
+   and save the settings.
+3. Open `/xlplugins`, search for **GlamSpector**, and choose **Install**.
+
+Future released versions are offered through Dalamud's normal plugin update
+flow. This custom repository is maintained by the GlamSpector author and is not
+an official Dalamud listing. Local development can continue to load the Debug
+DLL through **Dev Plugin Locations**; that workflow is unchanged.
+
+## M3.15.5 — Distribution and custom repository
+
+- Adds a stable custom-repository manifest for installing GlamSpector from a
+  version-pinned GitHub Release package.
+- Release packaging now contains the plugin, required managed dependencies, and
+  only the Windows x64 SQLite native runtime rather than unrelated platform
+  runtimes.
+- Adds locked Windows CI builds, release-metadata/package validation, and a
+  tag-only workflow that publishes the packager-generated `latest.zip`.
+- Keeps plugin runtime behavior, local Library/media privacy, and local Dev
+  Plugin DLL development unchanged.
+
+### Maintainer release sequence
+
+1. Bump `Version` in `GlamSpector.csproj`, update `repo.json` to the same
+   version and `vX.Y.Z/latest.zip` URLs, and update manifest/changelog/docs.
+2. Run `scripts/Validate-Release.ps1`, locked restore, and a Release build;
+   inspect `bin/Release/GlamSpector/latest.zip`, then validate it with
+   `scripts/Validate-Release.ps1 -PackagePath <zip>`.
+3. Commit and merge the reviewed release metadata to `main`.
+4. Create and push tag `vX.Y.Z` on that exact main commit. The tag workflow
+   validates the tag, rebuilds, and publishes the generated ZIP as
+   `latest.zip`; it never rewrites `repo.json`.
+5. Verify the release asset and the permanent raw `repo.json` subscription URL
+   are reachable before asking users to update.
+
 ## M3.15.4 — Library rendering performance
 
 - Virtualizes the left Library list with a fixed-height manual visible range.

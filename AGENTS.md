@@ -8,9 +8,9 @@ This repository is developed iteratively with the user. Product/design decisions
 
 ## Current baseline
 
-- Current milestone at handoff: **M3.15.4**
+- Current milestone at handoff: **M3.15.5**
 - Project SDK: `Dalamud.NET.Sdk/15.0.0`
-- Project version: `0.3.15.4`
+- Project version: `0.3.15.5`
 - Current resolved target in `packages.lock.json`: `net10.0-windows7.0`
 - Important packages include `Microsoft.Data.Sqlite`, `SQLitePCLRaw.bundle_e_sqlite3`, `SixLabors.ImageSharp`, and `SixLabors.ImageSharp.Drawing`.
 
@@ -184,6 +184,27 @@ A successful compile does not replace in-game testing for:
 - ownership cache behavior
 - ImGui layout
 - FFXIV clipboard/media interaction
+
+## Distribution and releases
+
+The public source and custom Dalamud repository share the existing
+`https://github.com/Totyh/GlamSpector` repository. The permanent subscription
+URL is `https://raw.githubusercontent.com/Totyh/GlamSpector/main/repo.json`.
+
+Release metadata is committed before tagging. Bump the project version and the
+version-pinned URLs/AssemblyVersion in `repo.json`, update the manifest and
+documentation, run `scripts/Validate-Release.ps1`, locked restore, and a Release
+build, then inspect and validate the packager-generated
+`bin/Release/GlamSpector/latest.zip`. After the reviewed commit reaches `main`,
+tag that exact commit `vX.Y.Z` and push the tag. The tag-only workflow publishes
+that generated ZIP to the matching GitHub Release; it must not rewrite or push
+`repo.json`. Do not tag until the package and metadata have been reviewed.
+
+The distributable package intentionally includes only GlamSpector's required
+managed dependencies and the Windows x64 SQLite native runtime. Keep local
+Library databases, configuration, screenshots/media, logs, build paths, and
+other personal/development files out of release artifacts. Distribution
+infrastructure must not add network behavior to the running plugin.
 
 ## Repository documentation
 

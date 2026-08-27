@@ -1,0 +1,23 @@
+[
+  {
+    "Author": "Totyh",
+    "Name": "GlamSpector",
+    "InternalName": "GlamSpector",
+    "AssemblyVersion": "0.3.15.5",
+    "Punchline": "Capture inspected glamours and keep a searchable Glamour Library.",
+    "Description": "Capture inspected character glamours into a searchable local Library with previews, gear and dye recipes, ownership tracking, personal previews, and sharing tools.",
+    "ApplicableVersion": "any",
+    "RepoUrl": "https://github.com/Totyh/GlamSpector",
+    "DalamudApiLevel": 15,
+    "IsHide": false,
+    "IsTestingExclusive": false,
+    "DownloadLinkInstall": "https://github.com/Totyh/GlamSpector/releases/download/v0.3.15.5/latest.zip",
+    "DownloadLinkUpdate": "https://github.com/Totyh/GlamSpector/releases/download/v0.3.15.5/latest.zip",
+    "Tags": [
+      "glamour",
+      "inspect",
+      "screenshot",
+      "library"
+    ]
+  }
+]

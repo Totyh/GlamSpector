@@ -279,6 +279,19 @@ in-memory presentation snapshot during `Refresh()` and rebuilt after all
 existing media/data mutations. SQLite remains the source of truth; the cache is
 not persisted.
 
+### M3.15.5 — Distribution and custom repository
+
+GlamSpector is distributed from the existing public source repository through
+a single stable Dalamud custom-repository URL. Store metadata points to
+version-pinned GitHub Release assets, while DalamudPackager remains the sole
+producer of the plugin ZIP. Normal pushes and pull requests build and validate
+the package; only a matching `vX.Y.Z` tag may create a GitHub Release.
+
+Distribution changes no plugin networking or privacy behavior. Local Library
+databases, configuration, character/media data, and developer files are not
+packaged. Local Debug DLL loading remains independent of the public release
+channel.
+
 ## Product/usability lessons so far
 
 1. **Feature hierarchy matters.** New features should be grouped by workflow rather than appended as another equal-priority button.
