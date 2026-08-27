@@ -1,6 +1,6 @@
 # ROADMAP.md — GlamSpector
 
-Current baseline: **M3.15.5, Distribution and custom repository**
+Current baseline: **M3.15.6, portable card-font fallback**
 
 Version labels below are planning candidates and can change after discussion. Do not treat an unimplemented roadmap item as an approved behavior unless the user explicitly requests it.
 
@@ -40,6 +40,12 @@ Completed before M3.15:
 - GlamSpector has a version-pinned custom Dalamud repository manifest,
   validated DalamudPackager Release ZIP, Windows CI build artifact, and
   tag-gated GitHub Release workflow (M3.15.5).
+- Card rendering no longer resolves `Segoe UI` during plugin startup; it uses
+  ordered system-font fallbacks at render time and embedded OFL-licensed Noto
+  Sans when SixLabors exposes no usable system family (M3.15.6).
+- Image clipboard publication is best-effort and session-capability-aware, so
+  an unsupported Dalamud clipboard implementation cannot fail an otherwise
+  completed capture (M3.15.6).
 
 ## Short-term polish candidates
 

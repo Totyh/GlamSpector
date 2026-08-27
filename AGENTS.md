@@ -8,9 +8,9 @@ This repository is developed iteratively with the user. Product/design decisions
 
 ## Current baseline
 
-- Current milestone at handoff: **M3.15.5**
+- Current milestone at handoff: **M3.15.6**
 - Project SDK: `Dalamud.NET.Sdk/15.0.0`
-- Project version: `0.3.15.5`
+- Project version: `0.3.15.6`
 - Current resolved target in `packages.lock.json`: `net10.0-windows7.0`
 - Important packages include `Microsoft.Data.Sqlite`, `SQLitePCLRaw.bundle_e_sqlite3`, `SixLabors.ImageSharp`, and `SixLabors.ImageSharp.Drawing`.
 
@@ -205,6 +205,24 @@ managed dependencies and the Windows x64 SQLite native runtime. Keep local
 Library databases, configuration, screenshots/media, logs, build paths, and
 other personal/development files out of release artifacts. Distribution
 infrastructure must not add network behavior to the running plugin.
+
+## Card font resolution
+
+Do not resolve system fonts while constructing `GlamCardRenderer` or the
+plugin. SixLabors.Fonts may be unable to resolve `Segoe UI` even on a Windows
+machine, and that must not prevent GlamSpector from loading. Resolve one font
+family only when rendering a card and preserve the documented preferred-family
+order. If no usable system family is exposed, load the embedded static Noto Sans
+Regular and Bold resources. Keep their SIL Open Font License 1.1 notice in the
+distribution package. Only a genuinely missing/corrupt packaged fallback may
+fail the requested card operation through the existing error path.
+
+Image clipboard publication is a convenience, not capture-critical. An
+unsupported or failed Dalamud clipboard operation must not prevent staged media
+publication, Library indexing, capture finalization, or later captures.
+Confirmed platform unavailability is remembered for the current plugin session
+to avoid repeated exceptions; real capture/plugin cancellation must still
+propagate through the generation and lifetime guards.
 
 ## Repository documentation
 

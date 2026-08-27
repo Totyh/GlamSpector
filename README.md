@@ -1,5 +1,20 @@
 # GlamSpector
 
+## M3.15.6 — Portable card-font fallback
+
+- Removes the eager `Segoe UI` lookup from plugin construction, so GlamSpector
+  can start even when SixLabors.Fonts cannot resolve that family.
+- Card rendering resolves one font per operation, preferring Segoe UI, then
+  Arial, Tahoma, Verdana, and the first other usable system family.
+- If SixLabors.Fonts exposes no usable system family (as observed under
+  NixOS/Wine), the renderer uses embedded static Noto Sans Regular and Bold
+  faces. The bundled fallback is licensed under the SIL Open Font License 1.1.
+- Font discovery remains lazy: plugin startup and unrelated Library/capture
+  behavior do not depend on system-font or bundled-font resolution.
+- Image clipboard publication is best-effort. Platforms where Dalamud does not
+  implement image clipboard copy still save, index, and finalize captures; the
+  first unsupported result is reported once per plugin session.
+
 ## Installation
 
 GlamSpector is distributed through a third-party Dalamud custom plugin

@@ -292,6 +292,28 @@ databases, configuration, character/media data, and developer files are not
 packaged. Local Debug DLL loading remains independent of the public release
 channel.
 
+### M3.15.6 — Portable card-font fallback
+
+The first custom-repository fresh-install test exposed that SixLabors.Fonts
+could fail to resolve `Segoe UI` from the Windows font directory. Because the
+renderer previously looked it up during plugin construction, that optional
+rendering dependency prevented the entire plugin from loading.
+
+System-font discovery now occurs only for an actual card render. It retains
+Segoe UI when resolvable, has explicit Windows fallbacks, and finally chooses a
+deterministic usable installed family. The follow-up NixOS/Wine test exposed no
+system families at all, so static Noto Sans Regular and Bold faces are embedded
+as the final fallback under the SIL Open Font License 1.1. Plugin construction
+still performs no font lookup; a packaged-font failure is isolated to the
+requested card render and reports that the plugin package needs repair.
+
+The same NixOS/Wine test then exposed Dalamud's image clipboard operation as
+unimplemented. Clipboard publication is now explicitly secondary: unsupported
+or failed clipboard work cannot discard staged media, prevent Library
+publication, or turn a completed capture into a capture failure. A confirmed
+unsupported capability is remembered only for the plugin session so later
+captures skip the unavailable operation without repeated exceptions.
+
 ## Product/usability lessons so far
 
 1. **Feature hierarchy matters.** New features should be grouped by workflow rather than appended as another equal-priority button.

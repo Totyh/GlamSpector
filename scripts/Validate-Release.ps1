@@ -84,6 +84,7 @@ if (-not [string]::IsNullOrWhiteSpace($PackagePath)) {
             'GlamSpector.deps.json',
             'GlamSpector.dll',
             'GlamSpector.json',
+            'licenses/NotoSans-OFL.txt',
             'Microsoft.Data.Sqlite.dll',
             'runtimes/win-x64/native/e_sqlite3.dll',
             'SixLabors.Fonts.dll',
@@ -122,6 +123,13 @@ if (-not [string]::IsNullOrWhiteSpace($PackagePath)) {
         Assert-Equal 'Packaged manifest AssemblyVersion' $packagedManifest.AssemblyVersion $projectVersion
         Assert-Equal 'Packaged manifest DalamudApiLevel' $packagedManifest.DalamudApiLevel $expectedApiLevel
         Assert-Equal 'Packaged assembly version' $assemblyVersion $projectVersion
+
+        $fontLicensePath = Join-Path $temporaryDirectory 'licenses\NotoSans-OFL.txt'
+        $fontLicense = Get-Content -LiteralPath $fontLicensePath -Raw
+        if ($fontLicense -notmatch 'SIL OPEN FONT LICENSE Version 1\.1' -or
+            $fontLicense -notmatch 'The Noto Project Authors') {
+            throw 'Packaged Noto Sans license notice is missing or invalid.'
+        }
     }
     finally {
         if (Test-Path -LiteralPath $temporaryDirectory) {

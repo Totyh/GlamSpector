@@ -82,6 +82,7 @@ public sealed class Plugin : IDalamudPlugin
     private PendingLibraryItemAction? pendingLibraryItemAction;
     private volatile bool personalPreviewCaptureInProgress;
     private volatile bool disposed;
+    private int clipboardUnavailableNoticeShown;
 
     private sealed class PlateCapturePrompt
     {
@@ -353,7 +354,7 @@ public sealed class Plugin : IDalamudPlugin
         Framework.Update += OnFrameworkUpdate;
 
         HandleVersionUpdateNotification(hadSavedConfiguration);
-        Log.Information("GlamSpector Milestone 3.15.5 loaded.");
+        Log.Information("GlamSpector Milestone 3.15.6 loaded.");
     }
 
     private void HandleVersionUpdateNotification(bool hadSavedConfiguration)
@@ -908,7 +909,14 @@ public sealed class Plugin : IDalamudPlugin
             ? "none"
             : $"gen={plate.OriginatingInspectGeneration},entity=0x{plate.EntityId:X8},ready={plate.ReadySinceUtc.HasValue},elapsed={(now - plate.StartedAtUtc).TotalSeconds:0.0}s/{GetAutomaticPlateOverallTimeoutSeconds():0.0}s";
 
-        return $"Capture lifecycle: phase={phase}; inProgress={inProgress}; requested={requested}; " +
+        var clipboard = previewCaptureService.ClipboardAvailability switch
+        {
+            ImageClipboardAvailability.Supported => "supported",
+            ImageClipboardAvailability.Unavailable => "unavailable",
+            _ => "unknown",
+        };
+
+        return $"Capture lifecycle: phase={phase}; inProgress={inProgress}; requested={requested}; clipboard={clipboard}; " +
                $"prep=[{preparationText}]; ready=[gen={readyGeneration},entity=0x{readyEntityId:X8}]; capture=[{captureText}]; retiredWorker=[{retiredWorkerText}]; plate=[{plateText}].";
     }
 
@@ -1372,12 +1380,24 @@ public sealed class Plugin : IDalamudPlugin
                 throw new FileNotFoundException("The PNG no longer exists.", path);
 
             var bytes = await File.ReadAllBytesAsync(path);
-            await previewCaptureService.CopyPngBytesToClipboardAsync(
+            var result = await previewCaptureService.TryCopyPngBytesToClipboardAsync(
                 bytes,
                 Path.GetFileNameWithoutExtension(path));
 
-            if (Configuration.NotifyClipboard)
-                _ = Framework.Run(() => ChatGui.Print("Copied image to clipboard.", "GlamSpector"));
+            switch (result.Outcome)
+            {
+                case ImageClipboardCopyOutcome.Copied:
+                    if (Configuration.NotifyClipboard)
+                        _ = Framework.Run(() => ChatGui.Print("Copied image to clipboard.", "GlamSpector"));
+                    break;
+                case ImageClipboardCopyOutcome.Unavailable:
+                    NotifyClipboardUnavailableOnce();
+                    break;
+                case ImageClipboardCopyOutcome.Failed:
+                    throw new InvalidOperationException("The image could not be copied to the clipboard.", result.Exception);
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(result.Outcome));
+            }
         }
         catch (Exception ex)
         {
@@ -1788,6 +1808,8 @@ public sealed class Plugin : IDalamudPlugin
         string? successMessage = null;
         string? errorMessage = null;
         string? libraryWarning = null;
+        var clipboardUnavailable = false;
+        Exception? clipboardWarningException = null;
         long? libraryEntryId = null;
         var textureAcquired = false;
         Dalamud.Interface.Textures.TextureWraps.IDalamudTextureWrap? texture = null;
@@ -1886,12 +1908,33 @@ public sealed class Plugin : IDalamudPlugin
 
             if (Configuration.CopyToClipboard)
             {
-                SetInspectCaptureStage(attempt, InspectCaptureStage.Clipboard);
-                await previewCaptureService.CopyPngBytesToClipboardAsync(
-                    cardBytes,
-                    Path.GetFileNameWithoutExtension(cardPath),
-                    attempt.Token);
-                EnsureInspectCaptureCanCommit(attempt);
+                if (previewCaptureService.ClipboardAvailability == ImageClipboardAvailability.Unavailable)
+                {
+                    clipboardUnavailable = true;
+                }
+                else
+                {
+                    SetInspectCaptureStage(attempt, InspectCaptureStage.Clipboard);
+                    var clipboardResult = await previewCaptureService.TryCopyPngBytesToClipboardAsync(
+                        cardBytes,
+                        Path.GetFileNameWithoutExtension(cardPath),
+                        attempt.Token);
+                    EnsureInspectCaptureCanCommit(attempt);
+
+                    switch (clipboardResult.Outcome)
+                    {
+                        case ImageClipboardCopyOutcome.Copied:
+                            break;
+                        case ImageClipboardCopyOutcome.Unavailable:
+                            clipboardUnavailable = true;
+                            break;
+                        case ImageClipboardCopyOutcome.Failed:
+                            clipboardWarningException = clipboardResult.Exception;
+                            break;
+                        default:
+                            throw new ArgumentOutOfRangeException(nameof(clipboardResult.Outcome));
+                    }
+                }
             }
 
             SetInspectCaptureStage(attempt, InspectCaptureStage.Finalize);
@@ -1996,6 +2039,20 @@ public sealed class Plugin : IDalamudPlugin
                         }
                         if (successMessage is not null && Configuration.NotifyCaptureSuccess)
                             ChatGui.Print(successMessage, "GlamSpector");
+                        if (clipboardUnavailable && TryClaimClipboardUnavailableNotice())
+                        {
+                            Log.Information(
+                                "Image clipboard publication is unavailable; captures will continue without it for this session.");
+                            ChatGui.Print(
+                                "Capture saved successfully, but image clipboard copy is unavailable on this platform.",
+                                "GlamSpector");
+                        }
+                        if (clipboardWarningException is not null)
+                        {
+                            Log.Warning(
+                                clipboardWarningException,
+                                "Could not copy the captured Glam Card to the clipboard; the capture continued successfully.");
+                        }
                         if (libraryWarning is not null)
                             ChatGui.PrintError(libraryWarning, "GlamSpector");
                         if (errorMessage is not null)
@@ -2156,18 +2213,45 @@ public sealed class Plugin : IDalamudPlugin
                 throw new FileNotFoundException("The saved Glam Card PNG no longer exists.", entry.CardPath);
 
             var bytes = await File.ReadAllBytesAsync(entry.CardPath);
-            await previewCaptureService.CopyPngBytesToClipboardAsync(
+            var result = await previewCaptureService.TryCopyPngBytesToClipboardAsync(
                 bytes,
                 Path.GetFileNameWithoutExtension(entry.CardPath));
 
-            if (Configuration.NotifyClipboard)
-                _ = Framework.Run(() => ChatGui.Print("Copied Glam Card to clipboard.", "GlamSpector"));
+            switch (result.Outcome)
+            {
+                case ImageClipboardCopyOutcome.Copied:
+                    if (Configuration.NotifyClipboard)
+                        _ = Framework.Run(() => ChatGui.Print("Copied Glam Card to clipboard.", "GlamSpector"));
+                    break;
+                case ImageClipboardCopyOutcome.Unavailable:
+                    NotifyClipboardUnavailableOnce();
+                    break;
+                case ImageClipboardCopyOutcome.Failed:
+                    throw new InvalidOperationException("The Glam Card could not be copied to the clipboard.", result.Exception);
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(result.Outcome));
+            }
         }
         catch (Exception ex)
         {
             Log.Error(ex, "Could not copy library Glam Card.");
             _ = Framework.Run(() => ChatGui.PrintError($"Could not copy card: {ex.Message}", "GlamSpector"));
         }
+    }
+
+    private bool TryClaimClipboardUnavailableNotice() =>
+        Interlocked.CompareExchange(ref clipboardUnavailableNoticeShown, 1, 0) == 0;
+
+    private void NotifyClipboardUnavailableOnce()
+    {
+        if (!TryClaimClipboardUnavailableNotice())
+            return;
+
+        _ = Framework.Run(() =>
+        {
+            if (IsPluginLifetimeValid())
+                ChatGui.Print("Image clipboard copy is unavailable on this platform.", "GlamSpector");
+        });
     }
 
     private void QueueAdventurerPlateCaptureIfConfigured(

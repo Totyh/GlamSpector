@@ -34,6 +34,10 @@ public sealed class PreviewCaptureService
     private readonly IGameGui gameGui;
     private readonly ITextureProvider textureProvider;
     private readonly ITextureReadbackProvider readbackProvider;
+    private int clipboardAvailability;
+
+    internal ImageClipboardAvailability ClipboardAvailability =>
+        (ImageClipboardAvailability)Volatile.Read(ref clipboardAvailability);
 
     public PreviewCaptureService(
         IGameGui gameGui,
@@ -379,21 +383,48 @@ public sealed class PreviewCaptureService
         return stream.ToArray();
     }
 
-    public async Task CopyPngBytesToClipboardAsync(
+    internal async Task<ImageClipboardCopyResult> TryCopyPngBytesToClipboardAsync(
         ReadOnlyMemory<byte> pngBytes,
         string preferredName,
         CancellationToken cancellationToken = default)
     {
-        using var texture = await textureProvider.CreateFromImageAsync(
-            pngBytes,
-            "GlamSpector Final Card",
-            cancellationToken);
+        if (ClipboardAvailability == ImageClipboardAvailability.Unavailable)
+            return ImageClipboardCopyResult.Unavailable();
 
-        await readbackProvider.CopyToClipboardAsync(
-            texture,
-            preferredName,
-            leaveWrapOpen: true,
-            cancellationToken: cancellationToken);
+        try
+        {
+            using var texture = await textureProvider.CreateFromImageAsync(
+                pngBytes,
+                "GlamSpector Final Card",
+                cancellationToken);
+
+            await readbackProvider.CopyToClipboardAsync(
+                texture,
+                preferredName,
+                leaveWrapOpen: true,
+                cancellationToken: cancellationToken);
+
+            Interlocked.CompareExchange(
+                ref clipboardAvailability,
+                (int)ImageClipboardAvailability.Supported,
+                (int)ImageClipboardAvailability.Unknown);
+            return ImageClipboardCopyResult.Copied();
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex) when (ex is NotImplementedException or PlatformNotSupportedException)
+        {
+            Interlocked.Exchange(
+                ref clipboardAvailability,
+                (int)ImageClipboardAvailability.Unavailable);
+            return ImageClipboardCopyResult.Unavailable(ex);
+        }
+        catch (Exception ex)
+        {
+            return ImageClipboardCopyResult.Failed(ex);
+        }
     }
 
     private Dalamud.Interface.Textures.IBitmapCodecInfo GetPngCodec()
@@ -416,3 +447,31 @@ internal readonly record struct PreviewScreenBounds(
     float Top,
     float Right,
     float Bottom);
+
+internal enum ImageClipboardAvailability
+{
+    Unknown,
+    Supported,
+    Unavailable,
+}
+
+internal enum ImageClipboardCopyOutcome
+{
+    Copied,
+    Unavailable,
+    Failed,
+}
+
+internal readonly record struct ImageClipboardCopyResult(
+    ImageClipboardCopyOutcome Outcome,
+    Exception? Exception)
+{
+    public static ImageClipboardCopyResult Copied() =>
+        new(ImageClipboardCopyOutcome.Copied, null);
+
+    public static ImageClipboardCopyResult Unavailable(Exception? exception = null) =>
+        new(ImageClipboardCopyOutcome.Unavailable, exception);
+
+    public static ImageClipboardCopyResult Failed(Exception exception) =>
+        new(ImageClipboardCopyOutcome.Failed, exception);
+}

@@ -14,6 +14,15 @@
                      MakeZip="false" />
   </Target>
 
+  <Target Name="StageGlamSpectorReleaseAssets"
+          BeforeTargets="PackageGlamSpectorRelease"
+          Condition="'$(Configuration)' == 'Release'">
+    <MakeDir Directories="$(OutputPath)licenses" />
+    <Copy SourceFiles="$(ProjectDir)Assets\Fonts\NotoSans-OFL.txt"
+          DestinationFiles="$(OutputPath)licenses\NotoSans-OFL.txt"
+          SkipUnchangedFiles="true" />
+  </Target>
+
   <Target Name="PackageGlamSpectorRelease"
           AfterTargets="Build"
           Condition="'$(Configuration)' == 'Release'">
@@ -21,6 +30,6 @@
                      OutputPath="$(OutputPath)"
                      AssemblyName="$(AssemblyName)"
                      MakeZip="true"
-                     Include="GlamSpector.dll;GlamSpector.deps.json;GlamSpector.json;Microsoft.Data.Sqlite.dll;SixLabors.Fonts.dll;SixLabors.ImageSharp.dll;SixLabors.ImageSharp.Drawing.dll;SQLitePCLRaw.batteries_v2.dll;SQLitePCLRaw.core.dll;SQLitePCLRaw.provider.e_sqlite3.dll;runtimes\win-x64\native\e_sqlite3.dll" />
+                     Include="GlamSpector.dll;GlamSpector.deps.json;GlamSpector.json;licenses\NotoSans-OFL.txt;Microsoft.Data.Sqlite.dll;SixLabors.Fonts.dll;SixLabors.ImageSharp.dll;SixLabors.ImageSharp.Drawing.dll;SQLitePCLRaw.batteries_v2.dll;SQLitePCLRaw.core.dll;SQLitePCLRaw.provider.e_sqlite3.dll;runtimes\win-x64\native\e_sqlite3.dll" />
   </Target>
 </Project>

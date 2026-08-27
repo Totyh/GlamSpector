@@ -36,15 +36,6 @@ public sealed class GlamCardRenderer
     private static readonly Color Ribbon = Color.FromRgb(104, 43, 48);
     private static readonly Color Divider = Color.FromRgb(67, 91, 103);
 
-    private readonly FontFamily fontFamily;
-
-    public GlamCardRenderer()
-    {
-        // GlamSpector is Windows-only with XIVLauncher/Dalamud. Segoe UI gives us a
-        // dependable system font without shipping any font files inside the plugin.
-        fontFamily = SystemFonts.Get("Segoe UI");
-    }
-
     public async Task<byte[]> RenderAsync(
         GlamourSnapshot snapshot,
         ReadOnlyMemory<byte> previewPng,
@@ -105,6 +96,7 @@ public sealed class GlamCardRenderer
     {
         cancellationToken.ThrowIfCancellationRequested();
         progress?.Invoke(GlamCardRenderStage.RenderCard);
+        var fontFamily = GlamCardFontResolver.Resolve();
         using var card = new Image<Rgba32>(CardWidth, CardHeight, new Rgba32(17, 35, 48));
 
         var previewDest = FitInside(preview.Width, preview.Height, new Rectangle(72, 188, 495, 730));
@@ -122,13 +114,13 @@ public sealed class GlamCardRenderer
             DrawRect(ctx, GoldSoft, 2f, 42, 38, CardWidth - 84, 104);
 
             var headerTitle = string.IsNullOrWhiteSpace(titleOverride) ? snapshot.CharacterName : titleOverride!;
-            DrawText(ctx, headerTitle, 66, 55, 43, FontStyle.Bold, Text, 700);
+            DrawText(ctx, fontFamily, headerTitle, 66, 55, 43, FontStyle.Bold, Text, 700);
             var identityLine = !string.IsNullOrWhiteSpace(subtitleOverride)
                 ? subtitleOverride!
                 : string.IsNullOrWhiteSpace(snapshot.FreeCompanyName)
                     ? $"@ {snapshot.HomeWorld}"
                     : $"@ {snapshot.HomeWorld}   •   FC: {snapshot.FreeCompanyName}";
-            DrawText(ctx, identityLine, 66, 105, 25, FontStyle.Regular, Muted, 1380);
+            DrawText(ctx, fontFamily, identityLine, 66, 105, 25, FontStyle.Regular, Muted, 1380);
 
             var previewPanel = new Rectangle(52, 168, 535, 770);
             FillRect(ctx, Panel, previewPanel.X, previewPanel.Y, previewPanel.Width, previewPanel.Height);
@@ -141,18 +133,18 @@ public sealed class GlamCardRenderer
             FillRect(ctx, Panel, rightPanel.X, rightPanel.Y, rightPanel.Width, rightPanel.Height);
             DrawRect(ctx, GoldSoft, 2f, rightPanel.X, rightPanel.Y, rightPanel.Width, rightPanel.Height);
 
-            DrawText(ctx, "GLAMOUR", 650, 192, 25, FontStyle.Bold, Gold, 800);
+            DrawText(ctx, fontFamily, "GLAMOUR", 650, 192, 25, FontStyle.Bold, Gold, 800);
             FillRect(ctx, Divider, 650, 232, 860, 2);
 
-            DrawMainGearSection(ctx, 650, 258, 405, snapshot);
+            DrawMainGearSection(ctx, fontFamily, 650, 258, 405, snapshot);
 
-            DrawSection(ctx, "ACCESSORIES", 1080, 258, 410, snapshot.Pieces,
+            DrawSection(ctx, fontFamily, "ACCESSORIES", 1080, 258, 410, snapshot.Pieces,
                 ["Earrings", "Necklace", "Bracelets", "Right Ring", "Left Ring"]);
 
             FillRect(ctx, Divider, 650, 760, 840, 2);
-            DrawText(ctx, "WEAPONS", 650, 784, 22, FontStyle.Bold, Gold, 400);
-            DrawWeapon(ctx, Find(snapshot.Pieces, "Main Hand"), "Main Hand", 650, 826, 400);
-            DrawWeapon(ctx, Find(snapshot.Pieces, "Off Hand"), "Off Hand", 1080, 826, 410);
+            DrawText(ctx, fontFamily, "WEAPONS", 650, 784, 22, FontStyle.Bold, Gold, 400);
+            DrawWeapon(ctx, fontFamily, Find(snapshot.Pieces, "Main Hand"), "Main Hand", 650, 826, 400);
+            DrawWeapon(ctx, fontFamily, Find(snapshot.Pieces, "Off Hand"), "Off Hand", 1080, 826, 410);
         });
 
         cancellationToken.ThrowIfCancellationRequested();
@@ -224,19 +216,20 @@ public sealed class GlamCardRenderer
 
     private void DrawMainGearSection(
         IImageProcessingContext ctx,
+        FontFamily fontFamily,
         float x,
         float y,
         float width,
         GlamourSnapshot snapshot)
     {
-        DrawText(ctx, "MAIN GEAR", x, y, 21, FontStyle.Bold, Gold, width);
+        DrawText(ctx, fontFamily, "MAIN GEAR", x, y, 21, FontStyle.Bold, Gold, width);
         var rowY = y + 43;
         var facewearName = snapshot.Facewear?.DisplayName;
 
         foreach (var slot in new[] { "Head", "Body", "Hands", "Legs", "Feet" })
         {
             var piece = Find(snapshot.Pieces, slot);
-            DrawPiece(ctx, piece, slot, x, rowY, width);
+            DrawPiece(ctx, fontFamily, piece, slot, x, rowY, width);
 
             if (slot == "Head" && !string.IsNullOrWhiteSpace(facewearName))
             {
@@ -245,8 +238,8 @@ public sealed class GlamCardRenderer
                 // place Facewear on the next line so both bits of information survive.
                 var hasHeadDye = piece is not null && !string.IsNullOrEmpty(BuildDyeLine(piece));
                 var facewearY = rowY + (hasHeadDye ? 72 : 53);
-                var facewear = FitText($"Facewear: {facewearName}", width, 14, 12, FontStyle.Regular);
-                DrawText(ctx, facewear.Text, x, facewearY, facewear.Size, FontStyle.Regular, Muted, width);
+                var facewear = FitText(fontFamily, $"Facewear: {facewearName}", width, 14, 12, FontStyle.Regular);
+                DrawText(ctx, fontFamily, facewear.Text, x, facewearY, facewear.Size, FontStyle.Regular, Muted, width);
                 rowY += hasHeadDye ? 106 : 92;
             }
             else
@@ -258,6 +251,7 @@ public sealed class GlamCardRenderer
 
     private void DrawSection(
         IImageProcessingContext ctx,
+        FontFamily fontFamily,
         string title,
         float x,
         float y,
@@ -265,65 +259,68 @@ public sealed class GlamCardRenderer
         IReadOnlyList<GlamourPiece> pieces,
         IReadOnlyList<string> slots)
     {
-        DrawText(ctx, title, x, y, 21, FontStyle.Bold, Gold, width);
+        DrawText(ctx, fontFamily, title, x, y, 21, FontStyle.Bold, Gold, width);
         var rowY = y + 43;
 
         foreach (var slot in slots)
         {
-            DrawPiece(ctx, Find(pieces, slot), slot, x, rowY, width);
+            DrawPiece(ctx, fontFamily, Find(pieces, slot), slot, x, rowY, width);
             rowY += 87;
         }
     }
 
     private void DrawPiece(
         IImageProcessingContext ctx,
+        FontFamily fontFamily,
         GlamourPiece? piece,
         string slot,
         float x,
         float y,
         float width)
     {
-        DrawText(ctx, slot, x, y, 16, FontStyle.Bold, Muted, width);
+        DrawText(ctx, fontFamily, slot, x, y, 16, FontStyle.Bold, Muted, width);
 
         if (piece is null)
         {
-            DrawText(ctx, "—", x, y + 24, 22, FontStyle.Regular, Text, width);
+            DrawText(ctx, fontFamily, "—", x, y + 24, 22, FontStyle.Regular, Text, width);
             return;
         }
 
-        var name = FitText(piece.DisplayItemName, width, 23, 15, FontStyle.Regular);
-        DrawText(ctx, name.Text, x, y + 23, name.Size, FontStyle.Regular, Text, width);
+        var name = FitText(fontFamily, piece.DisplayItemName, width, 23, 15, FontStyle.Regular);
+        DrawText(ctx, fontFamily, name.Text, x, y + 23, name.Size, FontStyle.Regular, Text, width);
 
         var dye = BuildDyeLine(piece);
         if (!string.IsNullOrEmpty(dye))
-            DrawText(ctx, dye, x, y + 53, 15, FontStyle.Regular, Muted, width);
+            DrawText(ctx, fontFamily, dye, x, y + 53, 15, FontStyle.Regular, Muted, width);
     }
 
     private void DrawWeapon(
         IImageProcessingContext ctx,
+        FontFamily fontFamily,
         GlamourPiece? piece,
         string slot,
         float x,
         float y,
         float width)
     {
-        DrawText(ctx, slot, x, y, 16, FontStyle.Bold, Muted, width);
+        DrawText(ctx, fontFamily, slot, x, y, 16, FontStyle.Bold, Muted, width);
         if (piece is null)
         {
-            DrawText(ctx, "—", x, y + 27, 22, FontStyle.Regular, Text, width);
+            DrawText(ctx, fontFamily, "—", x, y + 27, 22, FontStyle.Regular, Text, width);
             return;
         }
 
-        var name = FitText(piece.DisplayItemName, width, 23, 15, FontStyle.Regular);
-        DrawText(ctx, name.Text, x, y + 27, name.Size, FontStyle.Regular, Text, width);
+        var name = FitText(fontFamily, piece.DisplayItemName, width, 23, 15, FontStyle.Regular);
+        DrawText(ctx, fontFamily, name.Text, x, y + 27, name.Size, FontStyle.Regular, Text, width);
 
         var dye = BuildDyeLine(piece);
         if (!string.IsNullOrEmpty(dye))
-            DrawText(ctx, dye, x, y + 57, 15, FontStyle.Regular, Muted, width);
+            DrawText(ctx, fontFamily, dye, x, y + 57, 15, FontStyle.Regular, Muted, width);
     }
 
     private void DrawText(
         IImageProcessingContext ctx,
+        FontFamily fontFamily,
         string text,
         float x,
         float y,
@@ -332,12 +329,13 @@ public sealed class GlamCardRenderer
         Color color,
         float maxWidth)
     {
-        var fitted = FitText(text, maxWidth, size, Math.Min(12, size), style);
+        var fitted = FitText(fontFamily, text, maxWidth, size, Math.Min(12, size), style);
         var font = fontFamily.CreateFont(fitted.Size, style);
         ctx.DrawText(fitted.Text, font, color, new PointF(x, y));
     }
 
     private (string Text, float Size) FitText(
+        FontFamily fontFamily,
         string text,
         float maxWidth,
         float preferredSize,
