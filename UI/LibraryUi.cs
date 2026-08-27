@@ -59,7 +59,19 @@ public sealed class LibraryUi
     private HashSet<uint> wantedItemIds = [];
     private Dictionary<long, OwnershipProgress> ownershipProgressByEntry = [];
     private Dictionary<long, int> wantedCountByEntry = [];
+    private readonly Dictionary<long, LibraryEntryPresentation> presentationByEntry = [];
     private DateTime lastOwnershipProgressRefreshUtc = DateTime.MinValue;
+    private int totalEntryCount;
+    private int lastFrameRowsDrawn;
+    private int lastFrameFirstRenderedIndex = -1;
+    private int lastFrameLastRenderedIndex = -1;
+    private int lastFrameThumbnailRequests;
+    private int snapshotPrimaryMediaResolutions;
+    private int performanceSampleFrames;
+    private double performanceSampleTotalMilliseconds;
+    private double performanceSampleMaxMilliseconds;
+    private double completedAverageDrawMilliseconds;
+    private double completedMaxDrawMilliseconds;
 
     private bool showFilters;
     private RatingFilter ratingFilter = RatingFilter.Any;
@@ -87,6 +99,19 @@ public sealed class LibraryUi
         GeneratedShareCards,
         SourceImages,
         AdventurerPlate,
+    }
+
+    private sealed class LibraryEntryPresentation
+    {
+        public string? PrimaryImagePath { get; set; }
+        public required string LocalCapturedAt { get; init; }
+        public required string RatingText { get; init; }
+        public required IReadOnlyList<PersonalPreview> PersonalPreviews { get; init; }
+        public required IReadOnlyList<GeneratedShareCard> GeneratedShareCards { get; init; }
+        public required IReadOnlyList<string> SourceImagePaths { get; init; }
+        public bool HasCapturedPreview { get; init; }
+        public bool HasCardImage { get; init; }
+        public bool HasAdventurerPlate { get; init; }
     }
 
     private enum RatingFilter
@@ -261,10 +286,17 @@ public sealed class LibraryUi
         if (!isOpen)
             return;
 
+        var drawStarted = Stopwatch.GetTimestamp();
+        lastFrameRowsDrawn = 0;
+        lastFrameFirstRenderedIndex = -1;
+        lastFrameLastRenderedIndex = -1;
+        lastFrameThumbnailRequests = 0;
+
         ImGui.SetNextWindowSize(new Vector2(1180, 760), ImGuiCond.FirstUseEver);
         if (!ImGui.Begin("GlamSpector Library###GlamSpectorLibrary", ref isOpen))
         {
             ImGui.End();
+            RecordDrawPerformance(drawStarted);
             return;
         }
 
@@ -352,6 +384,36 @@ public sealed class LibraryUi
             DrawGlamCodeImportWindow();
         if (showEorzeaCollectionImport)
             DrawEorzeaCollectionImportWindow();
+
+        RecordDrawPerformance(drawStarted);
+    }
+
+    public string GetPerformanceDiagnostics()
+    {
+        if (!isOpen)
+            return $"Library perf: open=False; total={totalEntryCount}.";
+
+        return $"Library perf: open=True; total={totalEntryCount}; search={allEntries.Count}; matching={entries.Count}; " +
+               $"range={lastFrameFirstRenderedIndex}..{lastFrameLastRenderedIndex}; rows={lastFrameRowsDrawn}; overscan=2; " +
+               $"thumbnails={lastFrameThumbnailRequests}; " +
+               $"mediaResolved={snapshotPrimaryMediaResolutions}/refresh; " +
+               $"draw={completedAverageDrawMilliseconds:0.00}ms avg/{completedMaxDrawMilliseconds:0.00}ms max.";
+    }
+
+    private void RecordDrawPerformance(long startedTimestamp)
+    {
+        var elapsedMilliseconds = Stopwatch.GetElapsedTime(startedTimestamp).TotalMilliseconds;
+        performanceSampleFrames++;
+        performanceSampleTotalMilliseconds += elapsedMilliseconds;
+        performanceSampleMaxMilliseconds = Math.Max(performanceSampleMaxMilliseconds, elapsedMilliseconds);
+        if (performanceSampleFrames < 120)
+            return;
+
+        completedAverageDrawMilliseconds = performanceSampleTotalMilliseconds / performanceSampleFrames;
+        completedMaxDrawMilliseconds = performanceSampleMaxMilliseconds;
+        performanceSampleFrames = 0;
+        performanceSampleTotalMilliseconds = 0;
+        performanceSampleMaxMilliseconds = 0;
     }
 
     private void DrawLibraryToolbar()
@@ -606,9 +668,9 @@ public sealed class LibraryUi
         query = plateFilter switch
         {
             PlateFilter.HasPlate => query.Where(entry =>
-                !string.IsNullOrWhiteSpace(entry.AdventurerPlatePath) && File.Exists(entry.AdventurerPlatePath)),
+                GetEntryPresentation(entry).HasAdventurerPlate),
             PlateFilter.NoPlate => query.Where(entry =>
-                string.IsNullOrWhiteSpace(entry.AdventurerPlatePath) || !File.Exists(entry.AdventurerPlatePath)),
+                !GetEntryPresentation(entry).HasAdventurerPlate),
             _ => query,
         };
 
@@ -660,63 +722,121 @@ public sealed class LibraryUi
             return;
         }
 
-        foreach (var entry in entries)
-        {
-            ImGui.PushID(unchecked((int)entry.Id));
+        const float rowHeight = 88f;
+        const float separatorHeight = 1f;
+        const int overscanRows = 2;
+        var thumbnailSize = new Vector2(118f, 88f);
+        var style = ImGui.GetStyle();
 
-            const float thumbnailWidth = 118f;
-            const float thumbnailHeight = 88f;
-            DrawThumbnail(entry, new Vector2(thumbnailWidth, thumbnailHeight));
-            ImGui.SameLine();
+        // Each fixed-height row advances once after the 88 px Selectable and
+        // once after its 1 px separator. Deriving the stride from live style
+        // spacing keeps scrolling aligned if the user's ImGui scale changes.
+        var rowStride = rowHeight + (2f * style.ItemSpacing.Y) + separatorHeight;
+        var viewportHeight = Math.Max(1f, ImGui.GetWindowSize().Y - (2f * style.WindowPadding.Y));
+        var totalContentHeight = entries.Count * rowStride;
+        var maximumScrollY = Math.Max(0f, totalContentHeight - viewportHeight);
+        var currentScrollY = ImGui.GetScrollY();
+        var effectiveScrollY = Math.Clamp(currentScrollY, 0f, maximumScrollY);
+        if (Math.Abs(currentScrollY - effectiveScrollY) > 0.5f)
+            ImGui.SetScrollY(effectiveScrollY);
 
-            var selectedNow = selected?.Id == entry.Id;
-            var localTime = entry.CapturedAtUtc == DateTime.MinValue
-                ? string.Empty
-                : entry.CapturedAtUtc.ToLocalTime().ToString("g");
-            var ratingText = entry.Rating > 0 ? $"{new string('★', entry.Rating)}{new string('☆', 5 - entry.Rating)}  " : string.Empty;
-            var progress = ownershipProgressByEntry.TryGetValue(entry.Id, out var cachedProgress)
-                ? cachedProgress
-                : new OwnershipProgress(0, entry.Pieces.Count + (entry.FacewearId != 0 ? 1 : 0));
-            var wantedCount = wantedCountByEntry.TryGetValue(entry.Id, out var cachedWantedCount) ? cachedWantedCount : 0;
-            var sizeSuffix = sort == LibrarySort.FileSize ? $" · {FormatBytes(entry.TotalMediaBytes)}" : string.Empty;
-            var progressText = progress.Total > 0
-                ? $"{progress.Owned}/{progress.Total} verified owned{(wantedCount > 0 ? $" · {wantedCount} wanted" : string.Empty)}{sizeSuffix}"
-                : $"No structured gear{sizeSuffix}";
-            var label = $"{entry.DisplayTitle}\n{ratingText}{localTime}\n{progressText}##entry";
-            if (ImGui.Selectable(label, selectedNow, ImGuiSelectableFlags.None, new Vector2(0, thumbnailHeight)))
-                Select(entry.Id);
+        var firstVisible = Math.Clamp((int)MathF.Floor(effectiveScrollY / rowStride), 0, entries.Count);
+        var lastVisibleExclusive = Math.Clamp(
+            (int)MathF.Ceiling((effectiveScrollY + viewportHeight) / rowStride),
+            firstVisible,
+            entries.Count);
+        var firstRendered = Math.Max(0, firstVisible - overscanRows);
+        var lastRenderedExclusive = Math.Min(entries.Count, lastVisibleExclusive + overscanRows);
 
-            ImGui.Separator();
-            ImGui.PopID();
-        }
+        lastFrameFirstRenderedIndex = firstRendered;
+        lastFrameLastRenderedIndex = lastRenderedExclusive - 1;
+
+        DrawVirtualRowSpacer(firstRendered, rowStride, style.ItemSpacing.Y);
+        for (var index = firstRendered; index < lastRenderedExclusive; index++)
+            DrawEntryRow(entries[index], thumbnailSize);
+        DrawVirtualRowSpacer(entries.Count - lastRenderedExclusive, rowStride, style.ItemSpacing.Y);
     }
 
-    private void DrawThumbnail(LibraryEntry entry, Vector2 boxSize)
+    private static void DrawVirtualRowSpacer(int rowCount, float rowStride, float itemSpacingY)
     {
-        var imagePath = GetPrimaryImagePath(entry);
-        if (string.IsNullOrWhiteSpace(imagePath) || !File.Exists(imagePath))
+        if (rowCount <= 0)
+            return;
+
+        // Dummy adds one ItemSpacing.Y advance of its own. Subtract that once
+        // so the skipped range occupies exactly rowCount * rowStride pixels.
+        var spacerHeight = Math.Max(0f, (rowCount * rowStride) - itemSpacingY);
+        ImGui.Dummy(new Vector2(1f, spacerHeight));
+    }
+
+    private void DrawEntryRow(LibraryEntry entry, Vector2 thumbnailSize)
+    {
+        lastFrameRowsDrawn++;
+        var presentation = GetEntryPresentation(entry);
+        ImGui.PushID(unchecked((int)entry.Id));
+        DrawThumbnail(entry, presentation, thumbnailSize);
+        ImGui.SameLine();
+
+        var selectedNow = selected?.Id == entry.Id;
+        var progress = ownershipProgressByEntry.TryGetValue(entry.Id, out var cachedProgress)
+            ? cachedProgress
+            : new OwnershipProgress(0, entry.Pieces.Count + (entry.FacewearId != 0 ? 1 : 0));
+        var wantedCount = wantedCountByEntry.TryGetValue(entry.Id, out var cachedWantedCount) ? cachedWantedCount : 0;
+        var sizeSuffix = sort == LibrarySort.FileSize ? $" · {FormatBytes(entry.TotalMediaBytes)}" : string.Empty;
+        var progressText = progress.Total > 0
+            ? $"{progress.Owned}/{progress.Total} verified owned{(wantedCount > 0 ? $" · {wantedCount} wanted" : string.Empty)}{sizeSuffix}"
+            : $"No structured gear{sizeSuffix}";
+        var label = $"{entry.DisplayTitle}\n{presentation.RatingText}{presentation.LocalCapturedAt}\n{progressText}##entry";
+        if (ImGui.Selectable(label, selectedNow, ImGuiSelectableFlags.None, new Vector2(0, thumbnailSize.Y)))
+            Select(entry.Id);
+
+        ImGui.Separator();
+        ImGui.PopID();
+    }
+
+    private void DrawThumbnail(LibraryEntry entry, LibraryEntryPresentation presentation, Vector2 boxSize)
+    {
+        var imagePath = presentation.PrimaryImagePath;
+        if (string.IsNullOrWhiteSpace(imagePath))
         {
-            var start = ImGui.GetCursorPos();
-            ImGui.Dummy(boxSize);
-            ImGui.SetCursorPos(start + new Vector2(14f, Math.Max(8f, boxSize.Y * 0.35f)));
-            if (LibraryStore.IsGlamCodePath(entry.CardPath))
-                ImGui.TextDisabled("GLAM CODE");
-            else if (LibraryStore.IsEorzeaCollectionMarkerPath(entry.CardPath))
-                ImGui.TextDisabled("EC GLAM");
-            else
-                ImGui.TextDisabled("NO IMAGE");
-            ImGui.SetCursorPos(new Vector2(start.X, start.Y + boxSize.Y));
+            DrawMissingThumbnail(entry, boxSize);
             return;
         }
 
-        var wrap = textureProvider.GetFromFileAbsolute(imagePath).GetWrapOrEmpty();
-        if (wrap.Width <= 0 || wrap.Height <= 0)
+        lastFrameThumbnailRequests++;
+        Dalamud.Bindings.ImGui.ImTextureID wrapHandle;
+        int wrapWidth;
+        int wrapHeight;
+        try
         {
+            var wrap = textureProvider.GetFromFileAbsolute(imagePath).GetWrapOrEmpty();
+            wrapHandle = wrap.Handle;
+            wrapWidth = wrap.Width;
+            wrapHeight = wrap.Height;
+        }
+        catch (Exception)
+        {
+            presentation.PrimaryImagePath = null;
+            DrawMissingThumbnail(entry, boxSize);
+            return;
+        }
+
+        if (wrapWidth <= 0 || wrapHeight <= 0)
+        {
+            // Do not stat healthy cached paths each frame. Only probe after a
+            // failed texture lookup so a file removed behind GlamSpector's back
+            // degrades to the normal placeholder until the next Refresh.
+            if (!File.Exists(imagePath))
+            {
+                presentation.PrimaryImagePath = null;
+                DrawMissingThumbnail(entry, boxSize);
+                return;
+            }
+
             ImGui.Dummy(boxSize);
             return;
         }
 
-        var imageAspect = (float)wrap.Width / wrap.Height;
+        var imageAspect = (float)wrapWidth / wrapHeight;
         var boxAspect = boxSize.X / boxSize.Y;
         var drawSize = imageAspect > boxAspect
             ? new Vector2(boxSize.X, boxSize.X / imageAspect)
@@ -727,13 +847,27 @@ public sealed class LibraryUi
         {
             var cursor = ImGui.GetCursorPos();
             ImGui.SetCursorPosY(cursor.Y + offsetY);
-            ImGui.Image(wrap.Handle, drawSize);
+            ImGui.Image(wrapHandle, drawSize);
             ImGui.SetCursorPosY(cursor.Y + boxSize.Y);
         }
         else
         {
-            ImGui.Image(wrap.Handle, drawSize);
+            ImGui.Image(wrapHandle, drawSize);
         }
+    }
+
+    private static void DrawMissingThumbnail(LibraryEntry entry, Vector2 boxSize)
+    {
+        var start = ImGui.GetCursorPos();
+        ImGui.Dummy(boxSize);
+        ImGui.SetCursorPos(start + new Vector2(14f, Math.Max(8f, boxSize.Y * 0.35f)));
+        if (LibraryStore.IsGlamCodePath(entry.CardPath))
+            ImGui.TextDisabled("GLAM CODE");
+        else if (LibraryStore.IsEorzeaCollectionMarkerPath(entry.CardPath))
+            ImGui.TextDisabled("EC GLAM");
+        else
+            ImGui.TextDisabled("NO IMAGE");
+        ImGui.SetCursorPos(new Vector2(start.X, start.Y + boxSize.Y));
     }
 
     private void DrawDetails()
@@ -1208,12 +1342,13 @@ public sealed class LibraryUi
 
     private void DrawMediaArea(LibraryEntry entry)
     {
-        var hasCapturedPreview = !string.IsNullOrWhiteSpace(entry.RawPreviewPath) && File.Exists(entry.RawPreviewPath);
-        var hasCardImage = !LibraryStore.IsImageLessPath(entry.CardPath) && File.Exists(entry.CardPath);
-        var hasPlate = !string.IsNullOrWhiteSpace(entry.AdventurerPlatePath) && File.Exists(entry.AdventurerPlatePath);
-        var hasSourceImages = entry.SourceImagePaths.Any(File.Exists);
-        var hasPersonalPreviews = entry.PersonalPreviews.Any(preview => File.Exists(preview.Path));
-        var hasGeneratedShareCards = entry.GeneratedShareCards.Any(card => File.Exists(card.Path));
+        var presentation = GetEntryPresentation(entry);
+        var hasCapturedPreview = presentation.HasCapturedPreview;
+        var hasCardImage = presentation.HasCardImage;
+        var hasPlate = presentation.HasAdventurerPlate;
+        var hasSourceImages = presentation.SourceImagePaths.Count > 0;
+        var hasPersonalPreviews = presentation.PersonalPreviews.Count > 0;
+        var hasGeneratedShareCards = presentation.GeneratedShareCards.Count > 0;
 
         ImGui.TextUnformatted("Media");
         ImGui.SameLine();
@@ -1304,13 +1439,13 @@ public sealed class LibraryUi
                 DrawImagePreview(entry.CardPath, 520f);
                 break;
             case MediaViewMode.PersonalPreviews:
-                DrawPersonalPreviews(entry);
+                DrawPersonalPreviews(entry, presentation.PersonalPreviews);
                 break;
             case MediaViewMode.GeneratedShareCards:
-                DrawGeneratedShareCards(entry);
+                DrawGeneratedShareCards(entry, presentation.GeneratedShareCards);
                 break;
             case MediaViewMode.SourceImages:
-                DrawSourceImages(entry);
+                DrawSourceImages(presentation.SourceImagePaths);
                 break;
             case MediaViewMode.AdventurerPlate:
                 DrawAdventurerPlate(entry);
@@ -1321,14 +1456,8 @@ public sealed class LibraryUi
         }
     }
 
-    private void DrawPersonalPreviews(LibraryEntry entry)
+    private void DrawPersonalPreviews(LibraryEntry entry, IReadOnlyList<PersonalPreview> previews)
     {
-        var previews = entry.PersonalPreviews
-            .Where(preview => File.Exists(preview.Path))
-            .OrderByDescending(preview => preview.CreatedAtUtc)
-            .ThenByDescending(preview => preview.Id)
-            .ToList();
-
         if (previews.Count == 0)
         {
             ImGui.TextDisabled("No personal Fitting Room previews are saved for this entry yet.");
@@ -1432,14 +1561,8 @@ public sealed class LibraryUi
         ImGui.EndTable();
     }
 
-    private void DrawGeneratedShareCards(LibraryEntry entry)
+    private void DrawGeneratedShareCards(LibraryEntry entry, IReadOnlyList<GeneratedShareCard> cards)
     {
-        var cards = entry.GeneratedShareCards
-            .Where(card => File.Exists(card.Path))
-            .OrderByDescending(card => card.CreatedAtUtc)
-            .ThenByDescending(card => card.Id)
-            .ToList();
-
         if (cards.Count == 0)
         {
             ImGui.TextDisabled("No generated share cards are saved for this entry yet.");
@@ -1558,8 +1681,8 @@ public sealed class LibraryUi
 
     private void DrawPrimaryImage(LibraryEntry entry)
     {
-        var primaryPath = GetPrimaryImagePath(entry);
-        if (!string.IsNullOrWhiteSpace(primaryPath) && File.Exists(primaryPath))
+        var primaryPath = GetEntryPresentation(entry).PrimaryImagePath;
+        if (!string.IsNullOrWhiteSpace(primaryPath))
         {
             var personalPreview = entry.PersonalPreviews.FirstOrDefault(preview =>
                 string.Equals(preview.Path, primaryPath, StringComparison.OrdinalIgnoreCase));
@@ -1588,29 +1711,56 @@ public sealed class LibraryUi
         }
     }
 
-    private static string? GetPrimaryImagePath(LibraryEntry entry)
+    private LibraryEntryPresentation GetEntryPresentation(LibraryEntry entry)
     {
-        var personalPrimary = entry.PersonalPreviews.FirstOrDefault(preview => preview.IsPrimary && File.Exists(preview.Path));
-        if (personalPrimary is not null)
-            return personalPrimary.Path;
+        if (presentationByEntry.TryGetValue(entry.Id, out var presentation))
+            return presentation;
 
-        // Upgrade older M3.12/M3.13 entries to the preview-first behaviour even
-        // if their personal previews predate the explicit Primary flag policy.
-        var newestPersonal = entry.PersonalPreviews
+        presentation = BuildEntryPresentation(entry);
+        presentationByEntry[entry.Id] = presentation;
+        return presentation;
+    }
+
+    private LibraryEntryPresentation BuildEntryPresentation(LibraryEntry entry)
+    {
+        snapshotPrimaryMediaResolutions++;
+        var personalPreviews = entry.PersonalPreviews
             .Where(preview => File.Exists(preview.Path))
             .OrderByDescending(preview => preview.CreatedAtUtc)
             .ThenByDescending(preview => preview.Id)
-            .FirstOrDefault();
-        if (newestPersonal is not null)
-            return newestPersonal.Path;
+            .ToArray();
+        var shareCards = entry.GeneratedShareCards
+            .Where(card => File.Exists(card.Path))
+            .OrderByDescending(card => card.CreatedAtUtc)
+            .ThenByDescending(card => card.Id)
+            .ToArray();
+        var sourceImages = entry.SourceImagePaths.Where(File.Exists).ToArray();
+        var hasCapturedPreview = !string.IsNullOrWhiteSpace(entry.RawPreviewPath) && File.Exists(entry.RawPreviewPath);
+        var hasCardImage = !LibraryStore.IsImageLessPath(entry.CardPath) && File.Exists(entry.CardPath);
+        var hasAdventurerPlate = !string.IsNullOrWhiteSpace(entry.AdventurerPlatePath) && File.Exists(entry.AdventurerPlatePath);
 
-        if (!string.IsNullOrWhiteSpace(entry.RawPreviewPath) && File.Exists(entry.RawPreviewPath))
-            return entry.RawPreviewPath;
+        var primaryPath = personalPreviews.FirstOrDefault(preview => preview.IsPrimary)?.Path
+                          ?? personalPreviews.FirstOrDefault()?.Path
+                          ?? (hasCapturedPreview ? entry.RawPreviewPath : null)
+                          ?? (hasCardImage ? entry.CardPath : null)
+                          ?? sourceImages.FirstOrDefault();
 
-        if (!LibraryStore.IsImageLessPath(entry.CardPath) && File.Exists(entry.CardPath))
-            return entry.CardPath;
-
-        return entry.SourceImagePaths.FirstOrDefault(File.Exists);
+        return new LibraryEntryPresentation
+        {
+            PrimaryImagePath = primaryPath,
+            LocalCapturedAt = entry.CapturedAtUtc == DateTime.MinValue
+                ? string.Empty
+                : entry.CapturedAtUtc.ToLocalTime().ToString("g"),
+            RatingText = entry.Rating > 0
+                ? $"{new string('★', entry.Rating)}{new string('☆', 5 - entry.Rating)}  "
+                : string.Empty,
+            PersonalPreviews = personalPreviews,
+            GeneratedShareCards = shareCards,
+            SourceImagePaths = sourceImages,
+            HasCapturedPreview = hasCapturedPreview,
+            HasCardImage = hasCardImage,
+            HasAdventurerPlate = hasAdventurerPlate,
+        };
     }
 
     private static void OpenLocalFile(string path)
@@ -1994,7 +2144,12 @@ public sealed class LibraryUi
         try
         {
             var selectedId = selected?.Id;
+            totalEntryCount = store.CountEntries();
             allEntries = store.Search(search, sort, 5000);
+            presentationByEntry.Clear();
+            snapshotPrimaryMediaResolutions = 0;
+            foreach (var entry in allEntries)
+                presentationByEntry[entry.Id] = BuildEntryPresentation(entry);
             RefreshWanted();
             RefreshOwnershipProgressCache(force: true);
             lastError = null;
@@ -2005,6 +2160,8 @@ public sealed class LibraryUi
                 if (refreshedSelection is not null)
                 {
                     selected = refreshedSelection;
+                    if (!presentationByEntry.ContainsKey(selected.Id))
+                        presentationByEntry[selected.Id] = BuildEntryPresentation(selected);
                     LoadMetadataEditors(refreshedSelection);
                 }
                 else
@@ -2024,6 +2181,8 @@ public sealed class LibraryUi
                 else
                 {
                     selected = restored;
+                    if (!presentationByEntry.ContainsKey(selected.Id))
+                        presentationByEntry[selected.Id] = BuildEntryPresentation(selected);
                     LoadMetadataEditors(restored, force: true);
                     applySecondarySectionState = true;
                 }
@@ -2035,6 +2194,7 @@ public sealed class LibraryUi
         {
             allEntries = [];
             entries = [];
+            presentationByEntry.Clear();
             lastError = ex.Message;
         }
     }
@@ -2237,9 +2397,8 @@ public sealed class LibraryUi
         }
     }
 
-    private void DrawSourceImages(LibraryEntry entry)
+    private void DrawSourceImages(IReadOnlyList<string> paths)
     {
-        var paths = entry.SourceImagePaths.Where(File.Exists).ToList();
         if (paths.Count == 0)
         {
             ImGui.TextDisabled("No locally cached source images are available.");

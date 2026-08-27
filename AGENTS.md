@@ -8,9 +8,9 @@ This repository is developed iteratively with the user. Product/design decisions
 
 ## Current baseline
 
-- Current milestone at handoff: **M3.15.3**
+- Current milestone at handoff: **M3.15.4**
 - Project SDK: `Dalamud.NET.Sdk/15.0.0`
-- Project version: `0.3.15.3`
+- Project version: `0.3.15.4`
 - Current resolved target in `packages.lock.json`: `net10.0-windows7.0`
 - Important packages include `Microsoft.Data.Sqlite`, `SQLitePCLRaw.bundle_e_sqlite3`, `SixLabors.ImageSharp`, and `SixLabors.ImageSharp.Drawing`.
 
@@ -156,6 +156,16 @@ Current hierarchy:
 - destructive entry actions are isolated under `Library entry`.
 
 Preserve this visual hierarchy when adding new actions.
+
+The left Library list is deliberately virtualized with a fixed-height manual
+visible range built from ordinary ImGui scroll/layout primitives. Do not replace
+it with a zero-initialized `ImGuiListClipper` native-layout struct: the bindings
+require native construction and incorrect ownership can crash the client. Media
+availability and primary-image selection belong to the in-memory Library
+presentation snapshot rebuilt by `Refresh()`. Do not move filesystem discovery
+or texture-provider requests back outside the visible/overscan-row loop; an open
+Library with hundreds of entries must scale primarily with the rows visible on
+screen.
 
 ## Validation expectations
 

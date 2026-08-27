@@ -1,6 +1,6 @@
 # ROADMAP.md — GlamSpector
 
-Current baseline: **M3.15.3, Inspect watchdog and stale-worker retirement**
+Current baseline: **M3.15.4, Library rendering performance**
 
 Version labels below are planning candidates and can change after discussion. Do not treat an unimplemented roadmap item as an approved behavior unless the user explicitly requests it.
 
@@ -34,6 +34,9 @@ Completed before M3.15:
   all-phase entity monitoring, staged media publication, and exact processing
   diagnostics; abandoned workers unwind privately without blocking newer
   captures (M3.15.3).
+- The left Library list is fixed-height and virtualized; per-entry primary
+  media and gallery availability are cached in the current UI snapshot so
+  off-screen rows perform no filesystem or texture-provider work (M3.15.4).
 
 ## Short-term polish candidates
 

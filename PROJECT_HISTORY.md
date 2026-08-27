@@ -261,6 +261,24 @@ texture provider actually settle. Automatic Inspect media is written to
 generation-specific staging files and promoted only while that generation still
 owns publication. Future capture work must preserve this separation.
 
+### M3.15.4 — Library rendering performance
+
+The left Library list originally rendered every matching entry every ImGui
+frame. At hundreds of entries that also repeated primary-media filesystem
+discovery and requested every off-screen image from Dalamud's shared texture
+provider, causing a large steady FPS loss whenever the Library was open.
+
+Library rows are now fixed-height and manually virtualized using ordinary ImGui
+scroll/layout primitives. An initial native `ImGuiListClipper` implementation
+incorrectly zero-initialized the native-layout struct and crashed FFXIV when the
+Library opened; it was removed rather than retained as a native lifetime risk.
+Only the visible/overscan slice formats row details or requests thumbnails.
+Primary paths, media availability, and ordered selected-entry galleries are
+resolved into a small
+in-memory presentation snapshot during `Refresh()` and rebuilt after all
+existing media/data mutations. SQLite remains the source of truth; the cache is
+not persisted.
+
 ## Product/usability lessons so far
 
 1. **Feature hierarchy matters.** New features should be grouped by workflow rather than appended as another equal-priority button.

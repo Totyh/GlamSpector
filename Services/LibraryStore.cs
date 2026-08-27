@@ -724,6 +724,14 @@ public sealed class LibraryStore
         };
     }
 
+    public int CountEntries()
+    {
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM library_entries;";
+        return Convert.ToInt32(command.ExecuteScalar());
+    }
+
     public List<LibraryEntry> Search(string? query, LibrarySort sort = LibrarySort.Newest, int limit = 250)
     {
         using var connection = OpenConnection();

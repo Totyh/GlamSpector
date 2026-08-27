@@ -1,5 +1,49 @@
 # GlamSpector
 
+## M3.15.4 — Library rendering performance
+
+- Virtualizes the left Library list with a fixed-height manual visible range.
+  It uses ordinary ImGui scroll/cursor layout only; no native clipper object is
+  involved. Only visible/overscan rows resolve row presentation and request
+  thumbnails, while scrolling, selection, search/filter order, and the existing
+  118×88 row appearance are preserved.
+- Builds a lightweight in-memory presentation snapshot during Library
+  `Refresh()`. Primary media, media availability, row date/rating text, and the
+  ordered personal-preview/share-card/source-image lists are reused instead of
+  being rediscovered from disk every frame.
+- Keeps Dalamud's shared file texture provider as the image cache. No persistent
+  thumbnail files are introduced. A visible image that disappears after refresh
+  falls back safely and is rediscovered on the next refresh.
+- Extends `/glamspector debug` / `/glamspector diag` with concise Library
+  counters: total/search/filter counts, rows actually drawn, visible thumbnail
+  requests, media resolutions per refresh, and a rolling 120-frame draw-time
+  average/maximum.
+- Leaves the five-second best-effort ownership-progress refresh and all
+  ownership semantics unchanged.
+
+### Suggested M3.15.4 test
+
+1. With roughly 800 entries and no search/filter, open the Library at a stable
+   location and compare FPS/frame time against the previous build. Leave it open
+   for at least ten seconds, scroll from top to middle/bottom, and confirm the
+   loss now tracks only the visible rows.
+2. Run `/glamspector debug` while the Library is open. Confirm `matching` is near
+   the full Library size while `rows` and `thumbnails` remain near the number
+   visible in the left pane, not hundreds.
+3. Search, apply each filter, and exercise every sort mode including **File
+   size**. Select entries before and after scrolling; highlighting, right-side
+   details, and persisted selection must remain correct. Confirm a selected
+   entry stays visible on the right when search or a category filter hides its
+   left-row match.
+4. For entries with Inspect Preview, Full Card, personal previews, Share Cards,
+   source images, and Adventurer Plate media, verify thumbnails and right-side
+   media remain unchanged. Exercise **Set primary**, capture/delete personal
+   preview, create/delete Share Card, attach Plate, and delete media; the left
+   thumbnail must update after the existing refresh path.
+5. Remove or rename one thumbnail file outside GlamSpector while the Library is
+   open. Scroll its row into view and confirm the UI does not throw; press
+   **Refresh** and confirm normal no-image fallback/media availability.
+
 ## M3.15.3 — Inspect watchdog and stale-worker retirement
 
 - Keeps the existing 10-second CharacterInspect viewport-texture timeout and

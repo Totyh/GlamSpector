@@ -2,7 +2,7 @@
   "Author": "Private development build",
   "Name": "GlamSpector",
   "Punchline": "Capture inspected glamours and keep a searchable Glamour Library.",
-  "Description": "Milestone 3.15.3 development build. Adds a whole-attempt Inspect capture watchdog, all-phase target monitoring, exact processing diagnostics, and generation-safe retirement of stale workers. Retains the shared Full Card/Inspect portrait path, manual-only Eorzea Collection import, update messages, editable Library titles and remembered Library UI state plus the preview-first Library, personal previews, generated Share Cards, Glam Codes, Wanted items, ownership progress, Try On, ratings, tags/notes, and managed media. /glamspector library | config",
+  "Description": "Milestone 3.15.4 development build. Manually virtualizes the Library entry list and caches per-entry media presentation so steady-state rendering processes only visible rows. Retains the M3.15.3 whole-attempt Inspect watchdog, all-phase target monitoring and stale-worker publication guards plus manual-only Eorzea Collection import, update notifications, editable Library titles, remembered Library UI state, personal previews, Share Cards, Glam Codes, Wanted items, ownership progress, Try On, ratings, tags/notes, and managed media. /glamspector library | config",
   "ApplicableVersion": "any",
   "Tags": [
     "glamour",
